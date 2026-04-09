@@ -1080,7 +1080,7 @@ const BloodPressureApp: React.FC = () => {
       const result = await requestLoginCodeRemote(email.trim());
       setIsCodeStage(true);
       setLoginCode("");
-      setDevCodeHint(result.devCode);
+      setDevCodeHint(result.devCode ?? null);
       setDataSyncError(null);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Nie udało się wysłać kodu logowania.";
