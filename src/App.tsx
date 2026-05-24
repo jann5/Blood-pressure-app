@@ -242,10 +242,54 @@ const formatDaysLabel = (days: number): string => {
   return `${days} dni`;
 };
 
-const mapAppError = (error: unknown, fallback: string): string => {
-  if (!(error instanceof Error)) return fallback;
+const extractErrorMessage = (error: unknown, fallback: string): string => {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
 
-  const lower = error.message.toLowerCase();
+  if (typeof error === "string" && error.trim()) {
+    return error;
+  }
+
+  if (error && typeof error === "object") {
+    const record = error as Record<string, unknown>;
+    const keys = ["message", "error", "shortMessage", "details"] as const;
+
+    for (const key of keys) {
+      const value = record[key];
+      if (typeof value === "string" && value.trim()) {
+        return value;
+      }
+    }
+
+    for (const nestedKey of ["data", "cause", "response"] as const) {
+      const nested = record[nestedKey];
+      if (!nested || typeof nested !== "object") continue;
+      const nestedRecord = nested as Record<string, unknown>;
+
+      for (const key of keys) {
+        const value = nestedRecord[key];
+        if (typeof value === "string" && value.trim()) {
+          return value;
+        }
+      }
+    }
+
+    try {
+      const serialized = JSON.stringify(error);
+      if (serialized && serialized !== "{}") {
+        return serialized;
+      }
+    } catch {
+      // ignore serialization errors
+    }
+  }
+
+  return fallback;
+};
+
+const mapAppError = (error: unknown, fallback: string): string => {
+  const lower = extractErrorMessage(error, fallback).toLowerCase();
   if (lower.includes("not authenticated")) {
     return "Sesja wygasła. Zaloguj się ponownie.";
   }
@@ -548,8 +592,12 @@ const AuthScreen: React.FC<{
     if (lower.includes("invalid password") || lower.includes("incorrect password")) {
       return "Nieprawidłowe hasło.";
     }
-    if (lower.includes("already exists") || lower.includes("already registered")) {
-      return "Konto z tym adresem e-mail już istnieje.";
+    if (
+      lower.includes("already exists") ||
+      lower.includes("already registered") ||
+      (lower.includes("account") && lower.includes("exists"))
+    ) {
+      return "Konto z tym adresem e-mail już istnieje. Zaloguj się.";
     }
     if (lower.includes("not found") || lower.includes("no account")) {
       return "Nie znaleziono konta dla tego adresu e-mail.";
@@ -566,6 +614,9 @@ const AuthScreen: React.FC<{
     }
     if (lower.includes("email verification")) {
       return "Najpierw potwierdź adres e-mail kodem z wiadomości.";
+    }
+    if (lower.includes("failed to fetch") || lower.includes("network")) {
+      return "Brak połączenia z serwerem. Sprawdź internet i spróbuj ponownie.";
     }
     return "Wystąpił błąd autoryzacji. Spróbuj ponownie.";
   };
@@ -607,8 +658,12 @@ const AuthScreen: React.FC<{
         setSuccess("Wysłaliśmy kod potwierdzający na Twój email.");
       }
     } catch (err) {
-      const rawError = err instanceof Error ? err.message : "Wystąpił błąd logowania.";
-      setError(mapAuthError(rawError));
+      const rawError = extractErrorMessage(err, "Wystąpił błąd logowania.");
+      const mappedError = mapAuthError(rawError);
+      setError(mappedError);
+      if (view === "signup" && mappedError.includes("już istnieje")) {
+        onChangeView("login");
+      }
     } finally {
       setIsLoading(false);
     }
@@ -642,7 +697,7 @@ const AuthScreen: React.FC<{
         throw new Error("Kod potwierdzający jest nieprawidłowy lub wygasł.");
       }
     } catch (err) {
-      const rawError = err instanceof Error ? err.message : "Nie udało się potwierdzić adresu e-mail.";
+      const rawError = extractErrorMessage(err, "Nie udało się potwierdzić adresu e-mail.");
       setError(mapAuthError(rawError));
     } finally {
       setIsLoading(false);
@@ -812,8 +867,7 @@ const AuthScreen: React.FC<{
                     await signIn("password", formData);
                     setSuccess("Wysłaliśmy nowy kod potwierdzający.");
                   } catch (err) {
-                    const rawError =
-                      err instanceof Error ? err.message : "Nie udało się wysłać nowego kodu.";
+                    const rawError = extractErrorMessage(err, "Nie udało się wysłać nowego kodu.");
                     setError(mapAuthError(rawError));
                   } finally {
                     setIsLoading(false);

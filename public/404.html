@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>404 | Ciśnieniomierz</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100dvh;
+        display: grid;
+        place-items: center;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background:
+          radial-gradient(circle at 20% 20%, rgba(10, 132, 255, 0.22), transparent 45%),
+          radial-gradient(circle at 80% 30%, rgba(48, 209, 88, 0.14), transparent 40%),
+          #07090f;
+        color: #f5f7ff;
+      }
+
+      .card {
+        width: min(560px, calc(100vw - 32px));
+        padding: 32px 28px;
+        border-radius: 20px;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+        backdrop-filter: blur(12px);
+      }
+
+      .code {
+        margin: 0;
+        font-size: clamp(48px, 8vw, 72px);
+        line-height: 1;
+        letter-spacing: 0.06em;
+        color: #64d2ff;
+      }
+
+      h1 {
+        margin: 14px 0 10px;
+        font-size: clamp(22px, 4.6vw, 34px);
+        line-height: 1.15;
+      }
+
+      p {
+        margin: 0;
+        color: rgba(255, 255, 255, 0.78);
+        line-height: 1.55;
+      }
+
+      .actions {
+        margin-top: 24px;
+      }
+
+      a {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 46px;
+        padding: 0 18px;
+        border-radius: 12px;
+        background: #0a84ff;
+        color: #fff;
+        text-decoration: none;
+        font-weight: 600;
+      }
+
+      a:hover {
+        filter: brightness(1.07);
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <p class="code">404</p>
+      <h1>Nie znaleziono strony</h1>
+      <p>
+        Ten adres nie istnieje albo został przeniesiony. Wróć na stronę główną aplikacji
+        i przejdź dalej stamtąd.
+      </p>
+      <div class="actions">
+        <a href="/">Przejdź do aplikacji</a>
+      </div>
+    </main>
+  </body>
+</html>
