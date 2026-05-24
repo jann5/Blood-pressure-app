@@ -580,8 +580,10 @@ const AuthScreen: React.FC<{
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [success, setSuccess] = useState<string | null>(null);
+  const authRequestInFlightRef = useRef(false);
 
   const normalizeEmail = (rawEmail: string) => rawEmail.trim().toLowerCase();
+  const normalizeVerificationCode = (rawCode: string) => rawCode.replace(/\D/g, "").slice(0, 6);
   const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
   const mapAuthError = (message: string) => {
@@ -608,6 +610,7 @@ const AuthScreen: React.FC<{
     if (
       lower.includes("invalid code") ||
       lower.includes("invalid verification") ||
+      lower.includes("could not verify code") ||
       lower.includes("kod") && lower.includes("wygas")
     ) {
       return "Kod potwierdzający jest nieprawidłowy lub wygasł.";
@@ -636,6 +639,11 @@ const AuthScreen: React.FC<{
 
   const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (authRequestInFlightRef.current) {
+      return;
+    }
+
+    authRequestInFlightRef.current = true;
     setError(null);
     setSuccess(null);
     setIsLoading(true);
@@ -678,29 +686,36 @@ const AuthScreen: React.FC<{
         onChangeView("login");
       }
     } finally {
+      authRequestInFlightRef.current = false;
       setIsLoading(false);
     }
   };
 
   const handleVerifyEmailCode = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (authRequestInFlightRef.current) {
+      return;
+    }
+
+    authRequestInFlightRef.current = true;
     setError(null);
     setSuccess(null);
     setIsLoading(true);
 
     try {
       const cleanEmail = normalizeEmail(email);
+      const cleanVerificationCode = normalizeVerificationCode(verificationCode);
       if (!emailPattern.test(cleanEmail)) {
         throw new Error("Podaj poprawny adres e-mail.");
       }
-      if (!verificationCode.trim()) {
+      if (cleanVerificationCode.length !== 6) {
         throw new Error("Podaj kod potwierdzający.");
       }
 
       const formData = new FormData();
       formData.append("email", cleanEmail);
       formData.append("flow", "email-verification");
-      formData.append("code", verificationCode.trim());
+      formData.append("code", cleanVerificationCode);
 
       const result = await signIn("password", formData);
       if (result.signingIn) {
@@ -713,6 +728,7 @@ const AuthScreen: React.FC<{
       const rawError = extractErrorMessage(err, "Nie udało się potwierdzić adresu e-mail.");
       setError(mapAuthError(rawError));
     } finally {
+      authRequestInFlightRef.current = false;
       setIsLoading(false);
     }
   };
@@ -845,7 +861,10 @@ const AuthScreen: React.FC<{
                 <Input
                   type="text"
                   value={verificationCode}
-                  onChange={(e) => setVerificationCode(e.target.value)}
+                  onChange={(e) => setVerificationCode(normalizeVerificationCode(e.target.value))}
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  pattern="[0-9]*"
                   className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF] tracking-[0.3em] text-center uppercase"
                   placeholder="123456"
                   maxLength={6}
@@ -866,6 +885,11 @@ const AuthScreen: React.FC<{
                 type="button"
                 className="w-full text-center text-white/55 text-sm hover:text-white/75 transition-colors"
                 onClick={async () => {
+                  if (authRequestInFlightRef.current) {
+                    return;
+                  }
+
+                  authRequestInFlightRef.current = true;
                   setError(null);
                   setSuccess(null);
                   setIsLoading(true);
@@ -883,6 +907,7 @@ const AuthScreen: React.FC<{
                     const rawError = extractErrorMessage(err, "Nie udało się wysłać nowego kodu.");
                     setError(mapAuthError(rawError));
                   } finally {
+                    authRequestInFlightRef.current = false;
                     setIsLoading(false);
                   }
                 }}
