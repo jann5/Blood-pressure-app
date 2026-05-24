@@ -3,6 +3,7 @@ import { Email } from "@convex-dev/auth/providers/Email";
 import { Password } from "@convex-dev/auth/providers/Password";
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+type VerificationPurpose = "verify-email" | "password-reset";
 
 const normalizeEmail = (value: string): string => value.trim().toLowerCase();
 
@@ -19,9 +20,11 @@ const validateEmail = (rawEmail: string): string => {
 const sendVerificationEmail = async ({
   identifier,
   token,
+  purpose = "verify-email",
 }: {
   identifier: string;
   token: string;
+  purpose?: VerificationPurpose;
 }) => {
   const mailBridgeUrl = process.env.MAIL_BRIDGE_URL;
   const mailBridgeToken = process.env.MAIL_BRIDGE_TOKEN;
@@ -36,7 +39,7 @@ const sendVerificationEmail = async ({
       "Content-Type": "application/json",
       "x-mail-bridge-token": mailBridgeToken,
     },
-    body: JSON.stringify({ to, token }),
+    body: JSON.stringify({ to, token, purpose }),
   });
 
   if (!response.ok) {
@@ -45,19 +48,23 @@ const sendVerificationEmail = async ({
   }
 };
 
+const createOtpEmailProvider = (id: string, purpose: VerificationPurpose) =>
+  Email({
+    id,
+    maxAge: 10 * 60,
+    async generateVerificationToken() {
+      return String(Math.floor(100000 + Math.random() * 900000));
+    },
+    async sendVerificationRequest({ identifier, token }) {
+      await sendVerificationEmail({ identifier, token, purpose });
+    },
+  });
+
 export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
   providers: [
     Password({
-      verify: Email({
-        id: "email-verification",
-        maxAge: 10 * 60,
-        async generateVerificationToken() {
-          return String(Math.floor(100000 + Math.random() * 900000));
-        },
-        async sendVerificationRequest({ identifier, token }) {
-          await sendVerificationEmail({ identifier, token });
-        },
-      }),
+      verify: createOtpEmailProvider("email-verification", "verify-email"),
+      reset: createOtpEmailProvider("password-reset", "password-reset"),
       profile(params) {
         if (typeof params.email !== "string") {
           throw new Error("Podaj poprawny adres e-mail.");

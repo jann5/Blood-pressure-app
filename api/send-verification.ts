@@ -1,7 +1,27 @@
 import nodemailer from "nodemailer";
 
+type MailPurpose = "verify-email" | "password-reset";
+
 const unauthorized = (res: any) => {
   res.status(401).json({ error: "unauthorized" });
+};
+
+const getMailTemplate = (purpose: MailPurpose) => {
+  if (purpose === "password-reset") {
+    return {
+      subject: "Kod resetu hasła do Ciśnieniomierza",
+      title: "Reset hasła",
+      lead: "Użyj poniższego kodu, aby ustawić nowe hasło do konta:",
+      footer: "Jeśli nie prosiłeś o reset hasła, zignoruj tę wiadomość.",
+    };
+  }
+
+  return {
+    subject: "Kod potwierdzający do Ciśnieniomierza",
+    title: "Potwierdź adres e-mail",
+    lead: "Użyj poniższego kodu, aby potwierdzić e-mail i zakończyć logowanie:",
+    footer: "Jeśli to nie Ty, zignoruj tę wiadomość.",
+  };
 };
 
 export default async function handler(req: any, res: any) {
@@ -18,9 +38,17 @@ export default async function handler(req: any, res: any) {
     return;
   }
 
-  const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body ?? {};
+  let body: Record<string, unknown>;
+  try {
+    body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body ?? {};
+  } catch {
+    res.status(400).json({ error: "invalid_json" });
+    return;
+  }
+
   const to = typeof body.to === "string" ? body.to.trim() : "";
   const token = typeof body.token === "string" ? body.token.trim() : "";
+  const purpose: MailPurpose = body.purpose === "password-reset" ? "password-reset" : "verify-email";
 
   if (!to || !token) {
     res.status(400).json({ error: "missing_fields" });
@@ -33,6 +61,7 @@ export default async function handler(req: any, res: any) {
   const smtpPass = process.env.SMTP_PASS;
   const smtpSecure = String(process.env.SMTP_SECURE ?? "true").toLowerCase() !== "false";
   const from = process.env.SMTP_FROM_EMAIL ?? smtpUser;
+  const template = getMailTemplate(purpose);
 
   if (!smtpPass) {
     res.status(500).json({ error: "smtp_pass_missing" });
@@ -53,15 +82,15 @@ export default async function handler(req: any, res: any) {
     await transporter.sendMail({
       from: `Ciśnieniomierz <${from}>`,
       to,
-      subject: "Kod potwierdzający do Ciśnieniomierza",
+      subject: template.subject,
       html: `
         <div style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 520px; margin: 0 auto; padding: 16px;">
-          <h2 style="margin: 0 0 12px; color: #111;">Potwierdź adres e-mail</h2>
-          <p style="margin: 0 0 12px; color: #444;">Użyj poniższego kodu, aby potwierdzić e-mail i zakończyć logowanie:</p>
+          <h2 style="margin: 0 0 12px; color: #111;">${template.title}</h2>
+          <p style="margin: 0 0 12px; color: #444;">${template.lead}</p>
           <div style="font-size: 28px; font-weight: 700; letter-spacing: 0.18em; padding: 10px 14px; border: 1px solid #ddd; border-radius: 10px; display: inline-block;">
             ${token}
           </div>
-          <p style="margin: 12px 0 0; color: #777; font-size: 12px;">Jeśli to nie Ty, zignoruj tę wiadomość.</p>
+          <p style="margin: 12px 0 0; color: #777; font-size: 12px;">${template.footer}</p>
         </div>
       `,
     });

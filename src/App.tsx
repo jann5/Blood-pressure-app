@@ -51,6 +51,7 @@ type PulseCategory = "low" | "normal" | "high";
 type TimeRange = "7d" | "30d" | "3m" | "all";
 type SettingsSectionKey = "pulse";
 type AuthView = "login" | "signup";
+type PasswordResetStep = "idle" | "request" | "verify";
 
 import type { Id } from "../convex/_generated/dataModel";
 
@@ -576,6 +577,10 @@ const AuthScreen: React.FC<{
   const [confirmPassword, setConfirmPassword] = useState("");
   const [verificationCode, setVerificationCode] = useState("");
   const [awaitsEmailVerification, setAwaitsEmailVerification] = useState(false);
+  const [passwordResetStep, setPasswordResetStep] = useState<PasswordResetStep>("idle");
+  const [passwordResetCode, setPasswordResetCode] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -585,17 +590,24 @@ const AuthScreen: React.FC<{
   const normalizeEmail = (rawEmail: string) => rawEmail.trim().toLowerCase();
   const normalizeVerificationCode = (rawCode: string) => rawCode.replace(/\D/g, "").slice(0, 6);
   const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const isPasswordResetFlow = passwordResetStep !== "idle";
 
   const mapAuthError = (message: string) => {
     const lower = message.toLowerCase();
+    if (lower.includes("invalid credentials")) {
+      return "Nieprawidłowy email lub hasło.";
+    }
     if (lower.includes("invalidsecret")) {
       return "Nieprawidłowe hasło.";
     }
-    if (lower.includes("invalidaccountid")) {
+    if (lower.includes("invalidaccountid") || lower.includes("invalid account id")) {
       return "Nie znaleziono konta dla tego adresu e-mail.";
     }
     if (lower.includes("toomanyfailedattempts")) {
       return "Za dużo nieudanych prób logowania. Spróbuj ponownie za chwilę.";
+    }
+    if (lower.includes("password reset is not enabled")) {
+      return "Odzyskiwanie hasła jest chwilowo niedostępne.";
     }
     if (lower.includes("invalid email") || lower.includes("podaj poprawny adres")) {
       return "Podaj poprawny adres e-mail.";
@@ -643,7 +655,36 @@ const AuthScreen: React.FC<{
     if (lower.includes("failed to fetch") || lower.includes("network")) {
       return "Brak połączenia z serwerem. Sprawdź internet i spróbuj ponownie.";
     }
+    if (lower.includes("server error")) {
+      return "Błąd serwera autoryzacji. Spróbuj ponownie za chwilę.";
+    }
     return "Wystąpił błąd autoryzacji. Spróbuj ponownie.";
+  };
+
+  const clearAuthFeedback = () => {
+    setError(null);
+    setSuccess(null);
+  };
+
+  const resetPasswordResetState = () => {
+    setPasswordResetStep("idle");
+    setPasswordResetCode("");
+    setNewPassword("");
+    setConfirmNewPassword("");
+  };
+
+  const startPasswordReset = () => {
+    clearAuthFeedback();
+    setAwaitsEmailVerification(false);
+    setVerificationCode("");
+    setPasswordResetStep("request");
+    setPassword("");
+    setConfirmPassword("");
+  };
+
+  const stopPasswordReset = () => {
+    clearAuthFeedback();
+    resetPasswordResetState();
   };
 
   const handleAuthSubmit = async (e: React.FormEvent) => {
@@ -681,10 +722,12 @@ const AuthScreen: React.FC<{
 
       const result = await signIn("password", formData);
       if (result.signingIn) {
+        resetPasswordResetState();
         setAwaitsEmailVerification(false);
         setSuccess(view === "signup" ? "Konto utworzone. Jesteś zalogowany." : "Zalogowano pomyślnie.");
       } else {
         setAwaitsEmailVerification(true);
+        resetPasswordResetState();
         setSuccess("Wysłaliśmy kod potwierdzający na Twój email.");
       }
     } catch (err) {
@@ -742,6 +785,121 @@ const AuthScreen: React.FC<{
     }
   };
 
+  const handlePasswordResetRequest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (authRequestInFlightRef.current) {
+      return;
+    }
+
+    authRequestInFlightRef.current = true;
+    clearAuthFeedback();
+    setIsLoading(true);
+
+    try {
+      const cleanEmail = normalizeEmail(email);
+      if (!emailPattern.test(cleanEmail)) {
+        throw new Error("Podaj poprawny adres e-mail.");
+      }
+
+      const formData = new FormData();
+      formData.append("email", cleanEmail);
+      formData.append("flow", "reset");
+      await signIn("password", formData);
+
+      setPasswordResetStep("verify");
+      setPasswordResetCode("");
+      setNewPassword("");
+      setConfirmNewPassword("");
+      setSuccess("Wysłaliśmy kod resetu hasła na Twój email.");
+    } catch (err) {
+      const rawError = extractErrorMessage(err, "Nie udało się rozpocząć resetu hasła.");
+      setError(mapAuthError(rawError));
+    } finally {
+      authRequestInFlightRef.current = false;
+      setIsLoading(false);
+    }
+  };
+
+  const handleResendPasswordResetCode = async () => {
+    if (authRequestInFlightRef.current) {
+      return;
+    }
+
+    authRequestInFlightRef.current = true;
+    clearAuthFeedback();
+    setIsLoading(true);
+
+    try {
+      const cleanEmail = normalizeEmail(email);
+      if (!emailPattern.test(cleanEmail)) {
+        throw new Error("Podaj poprawny adres e-mail.");
+      }
+
+      const formData = new FormData();
+      formData.append("email", cleanEmail);
+      formData.append("flow", "reset");
+      await signIn("password", formData);
+
+      setPasswordResetStep("verify");
+      setSuccess("Wysłaliśmy nowy kod resetu hasła.");
+    } catch (err) {
+      const rawError = extractErrorMessage(err, "Nie udało się wysłać nowego kodu resetu.");
+      setError(mapAuthError(rawError));
+    } finally {
+      authRequestInFlightRef.current = false;
+      setIsLoading(false);
+    }
+  };
+
+  const handlePasswordResetVerification = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (authRequestInFlightRef.current) {
+      return;
+    }
+
+    authRequestInFlightRef.current = true;
+    clearAuthFeedback();
+    setIsLoading(true);
+
+    try {
+      const cleanEmail = normalizeEmail(email);
+      const cleanCode = normalizeVerificationCode(passwordResetCode);
+      if (!emailPattern.test(cleanEmail)) {
+        throw new Error("Podaj poprawny adres e-mail.");
+      }
+      if (cleanCode.length !== 6) {
+        throw new Error("Podaj 6-cyfrowy kod resetu.");
+      }
+      if (!newPassword || newPassword.length < 8) {
+        throw new Error("Nowe hasło musi mieć co najmniej 8 znaków.");
+      }
+      if (newPassword !== confirmNewPassword) {
+        throw new Error("Nowe hasła nie są takie same.");
+      }
+
+      const formData = new FormData();
+      formData.append("email", cleanEmail);
+      formData.append("flow", "reset-verification");
+      formData.append("code", cleanCode);
+      formData.append("newPassword", newPassword);
+
+      const result = await signIn("password", formData);
+      if (!result.signingIn) {
+        throw new Error("Kod resetu jest nieprawidłowy lub wygasł.");
+      }
+
+      resetPasswordResetState();
+      setAwaitsEmailVerification(false);
+      setSuccess("Hasło zostało zmienione. Jesteś zalogowany.");
+    } catch (err) {
+      const rawError = extractErrorMessage(err, "Nie udało się zresetować hasła.");
+      setError(mapAuthError(rawError));
+    } finally {
+      authRequestInFlightRef.current = false;
+      setIsLoading(false);
+    }
+  };
+
   return (
     <div
       ref={authScreenRef}
@@ -769,6 +927,10 @@ const AuthScreen: React.FC<{
           <h1 className="text-3xl font-bold text-white text-center mb-1">
             {awaitsEmailVerification
               ? "Potwierdź email"
+              : passwordResetStep === "request"
+              ? "Odzyskiwanie hasła"
+              : passwordResetStep === "verify"
+              ? "Nowe hasło"
               : view === "signup"
               ? "Rejestracja"
               : "Logowanie"}
@@ -776,12 +938,16 @@ const AuthScreen: React.FC<{
           <p className="text-center text-white/55 text-sm mb-6">
             {awaitsEmailVerification
               ? `Wpisz kod wysłany na ${normalizeEmail(email)}`
+              : passwordResetStep === "request"
+              ? "Podaj e-mail konta. Wyślemy kod do resetu hasła."
+              : passwordResetStep === "verify"
+              ? `Wpisz kod resetu wysłany na ${normalizeEmail(email)} i ustaw nowe hasło.`
               : view === "signup"
               ? "Utwórz konto raz i korzystaj na tym urządzeniu bez ponownego logowania."
               : "Zaloguj się raz, a sesja zostanie zapamiętana na tym urządzeniu."}
           </p>
 
-          {!awaitsEmailVerification ? (
+          {!awaitsEmailVerification && !isPasswordResetFlow ? (
             <form onSubmit={handleAuthSubmit} className="space-y-4">
               {view === "signup" && (
                 <div>
@@ -850,10 +1016,10 @@ const AuthScreen: React.FC<{
               <button
                 type="button"
                 onClick={() => {
-                  setError(null);
-                  setSuccess(null);
+                  clearAuthFeedback();
                   setAwaitsEmailVerification(false);
                   setVerificationCode("");
+                  resetPasswordResetState();
                   onChangeView(view === "login" ? "signup" : "login");
                 }}
                 className="w-full text-center text-white/55 text-sm hover:text-white/75 transition-colors"
@@ -862,7 +1028,129 @@ const AuthScreen: React.FC<{
                   ? "Nie masz konta? Zarejestruj się"
                   : "Masz już konto? Przejdź do logowania"}
               </button>
+
+              {view === "login" && (
+                <button
+                  type="button"
+                  onClick={startPasswordReset}
+                  className="w-full text-center text-white/55 text-sm hover:text-white/75 transition-colors"
+                >
+                  Nie pamiętasz hasła? Odzyskaj hasło
+                </button>
+              )}
             </form>
+          ) : isPasswordResetFlow ? (
+            passwordResetStep === "request" ? (
+              <form onSubmit={handlePasswordResetRequest} className="space-y-4">
+                <div>
+                  <Label className="text-white/55 text-sm mb-2 block">Email</Label>
+                  <Input
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF]"
+                    placeholder="twoj@email.pl"
+                    required
+                  />
+                </div>
+
+                <LiquidButton
+                  type="submit"
+                  className="w-full"
+                  variant="default"
+                  disabled={isLoading}
+                >
+                  {isLoading ? "Wysyłanie..." : "Wyślij kod resetu"}
+                </LiquidButton>
+
+                <button
+                  type="button"
+                  className="w-full text-center text-white/55 text-sm hover:text-white/75 transition-colors"
+                  onClick={stopPasswordReset}
+                >
+                  Wróć do logowania
+                </button>
+              </form>
+            ) : (
+              <form onSubmit={handlePasswordResetVerification} className="space-y-4">
+                <div>
+                  <Label className="text-white/55 text-sm mb-2 block">Email</Label>
+                  <Input
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF]"
+                    placeholder="twoj@email.pl"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <Label className="text-white/55 text-sm mb-2 block">Kod resetu</Label>
+                  <Input
+                    type="text"
+                    value={passwordResetCode}
+                    onChange={(e) => setPasswordResetCode(normalizeVerificationCode(e.target.value))}
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    pattern="[0-9]*"
+                    className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF] tracking-[0.3em] text-center uppercase"
+                    placeholder="123456"
+                    maxLength={6}
+                    required
+                  />
+                </div>
+
+                <div>
+                  <Label className="text-white/55 text-sm mb-2 block">Nowe hasło</Label>
+                  <Input
+                    type="password"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF]"
+                    placeholder="Minimum 8 znaków"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <Label className="text-white/55 text-sm mb-2 block">Powtórz nowe hasło</Label>
+                  <Input
+                    type="password"
+                    value={confirmNewPassword}
+                    onChange={(e) => setConfirmNewPassword(e.target.value)}
+                    className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF]"
+                    placeholder="Powtórz nowe hasło"
+                    required
+                  />
+                </div>
+
+                <LiquidButton
+                  type="submit"
+                  className="w-full"
+                  variant="default"
+                  disabled={isLoading}
+                >
+                  {isLoading ? "Zapisywanie..." : "Ustaw nowe hasło"}
+                </LiquidButton>
+
+                <button
+                  type="button"
+                  className="w-full text-center text-white/55 text-sm hover:text-white/75 transition-colors"
+                  onClick={handleResendPasswordResetCode}
+                >
+                  Wyślij nowy kod resetu
+                </button>
+
+                <button
+                  type="button"
+                  className="w-full text-center text-white/55 text-sm hover:text-white/75 transition-colors"
+                  onClick={stopPasswordReset}
+                >
+                  Wróć do logowania
+                </button>
+              </form>
+            )
           ) : (
             <form onSubmit={handleVerifyEmailCode} className="space-y-4">
               <div>
@@ -930,8 +1218,7 @@ const AuthScreen: React.FC<{
                 onClick={() => {
                   setAwaitsEmailVerification(false);
                   setVerificationCode("");
-                  setError(null);
-                  setSuccess(null);
+                  clearAuthFeedback();
                 }}
               >
                 Wróć do formularza
