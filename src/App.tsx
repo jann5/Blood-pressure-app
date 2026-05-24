@@ -615,6 +615,19 @@ const AuthScreen: React.FC<{
     if (lower.includes("email verification")) {
       return "Najpierw potwierdź adres e-mail kodem z wiadomości.";
     }
+    if (lower.includes("resend nie jest gotowy produkcyjnie")) {
+      return "Problem z konfiguracją emaili. Administrator musi zweryfikować domenę w Resend i ustawić poprawny adres nadawcy.";
+    }
+    if (lower.includes("verify a domain at resend.com/domains")) {
+      return "Problem z konfiguracją emaili. Administrator musi zweryfikować domenę w Resend i ustawić poprawny adres nadawcy.";
+    }
+    if (
+      lower.includes("smtp_send_failed") ||
+      lower.includes("incorrect authentication data") ||
+      lower.includes("invalid login: 535")
+    ) {
+      return "Problem z konfiguracją skrzynki e-mail. Sprawdź login/hasło SMTP.";
+    }
     if (lower.includes("failed to fetch") || lower.includes("network")) {
       return "Brak połączenia z serwerem. Sprawdź internet i spróbuj ponownie.";
     }
