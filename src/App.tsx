@@ -588,6 +588,15 @@ const AuthScreen: React.FC<{
 
   const mapAuthError = (message: string) => {
     const lower = message.toLowerCase();
+    if (lower.includes("invalidsecret")) {
+      return "Nieprawidłowe hasło.";
+    }
+    if (lower.includes("invalidaccountid")) {
+      return "Nie znaleziono konta dla tego adresu e-mail.";
+    }
+    if (lower.includes("toomanyfailedattempts")) {
+      return "Za dużo nieudanych prób logowania. Spróbuj ponownie za chwilę.";
+    }
     if (lower.includes("invalid email") || lower.includes("podaj poprawny adres")) {
       return "Podaj poprawny adres e-mail.";
     }
