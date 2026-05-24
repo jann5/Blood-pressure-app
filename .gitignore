@@ -1,5 +1,7 @@
 node_modules
 .DS_Store
+.next
+out
 dist
 .vite
 *.local

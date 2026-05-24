@@ -8,7 +8,13 @@
  * @module
  */
 
-import type * as bp from "../bp.js";
+import type * as account from "../account.js";
+import type * as auth from "../auth.js";
+import type * as authHelpers from "../authHelpers.js";
+import type * as email from "../email.js";
+import type * as http from "../http.js";
+import type * as preferences from "../preferences.js";
+import type * as readings from "../readings.js";
 
 import type {
   ApiFromModules,
@@ -17,7 +23,13 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
-  bp: typeof bp;
+  account: typeof account;
+  auth: typeof auth;
+  authHelpers: typeof authHelpers;
+  email: typeof email;
+  http: typeof http;
+  preferences: typeof preferences;
+  readings: typeof readings;
 }>;
 
 /**

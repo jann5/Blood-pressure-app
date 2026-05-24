@@ -98,8 +98,46 @@ const convexCall = async <T>(
   return payload.value;
 };
 
-export const requestLoginCodeRemote = async (email: string): Promise<LoginCodeResult> => {
-  return convexCall<LoginCodeResult>("action", "bp:sendLoginCode", { email });
+export const requestLoginCodeRemote = async (
+  email: string,
+  isRegistration?: boolean
+): Promise<LoginCodeResult> => {
+  // Backward compatibility with older deployed backend versions
+  // where isRegistration was required.
+  const callWithFallback = async (): Promise<LoginCodeResult> => {
+    try {
+      return await convexCall<LoginCodeResult>("action", "bp:sendLoginCode", { email });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes("isRegistration")) {
+        throw error;
+      }
+
+      try {
+        return await convexCall<LoginCodeResult>("action", "bp:sendLoginCode", {
+          email,
+          isRegistration: false,
+        });
+      } catch (loginError) {
+        const loginMessage = loginError instanceof Error ? loginError.message : String(loginError);
+        if (loginMessage.includes("Nie znaleziono konta")) {
+          return convexCall<LoginCodeResult>("action", "bp:sendLoginCode", {
+            email,
+            isRegistration: true,
+          });
+        }
+        throw loginError;
+      }
+    }
+  };
+
+  if (typeof isRegistration !== "boolean") {
+    return callWithFallback();
+  }
+
+  const args: { email: string; isRegistration?: boolean } = { email };
+  args.isRegistration = isRegistration;
+  return convexCall<LoginCodeResult>("action", "bp:sendLoginCode", args);
 };
 
 export const verifyLoginCodeRemote = async (

@@ -11,17 +11,20 @@ import {
   Download,
   Heart,
   Home,
+  KeyRound,
   LogOut,
   Plus,
   Settings,
   Trash2,
   TrendingUp,
+  UserX,
   X,
 } from "lucide-react";
 import {
   CartesianGrid,
   Line,
   LineChart,
+  ReferenceArea,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
@@ -38,37 +41,26 @@ import {
   type InteractiveMenuItem,
 } from "@/components/ui/modern-mobile-menu";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  addReadingRemote,
-  deleteReadingRemote,
-  getUserStateRemote,
-  requestLoginCodeRemote,
-  savePreferencesRemote,
-  verifyLoginCodeRemote,
-  type RemotePreferences,
-  type RemoteReading,
-} from "@/lib/convex-api";
+import { useAuthActions, useConvexAuth } from "@convex-dev/auth/react";
+import { api } from "../convex/_generated/api";
+import { useAction, useMutation, useQuery } from "convex/react";
 
 type AppTab = "dashboard" | "add" | "history" | "analytics";
-type PressureCategory = "normal" | "elevated" | "high1" | "high2" | "high3" | "low";
+type PressureCategory = "normal" | "elevated" | "high1" | "high2" | "low";
 type PulseCategory = "low" | "normal" | "high";
 type TimeRange = "7d" | "30d" | "3m" | "all";
-type SettingsSectionKey = "pressure" | "pulse";
+type SettingsSectionKey = "pulse";
+type AuthView = "login" | "signup";
+
+import type { Id } from "../convex/_generated/dataModel";
 
 interface BloodPressureReading {
-  id: string;
+  id: Id<"readings">;
   systolic: number;
   diastolic: number;
   pulse: number;
   timestamp: Date;
   note?: string;
-}
-
-interface User {
-  id: string;
-  email: string;
-  name: string;
-  age?: number;
 }
 
 interface PressurePreferences {
@@ -111,19 +103,20 @@ const defaultMeasurementPreferences: MeasurementPreferences = {
   },
 };
 
-const mapRemotePreferences = (prefs: RemotePreferences): MeasurementPreferences => ({
-  pressure: { ...prefs.pressure },
-  pulse: { ...prefs.pulse },
-});
-
-const mapRemoteReading = (reading: RemoteReading): BloodPressureReading => ({
-  id: reading._id,
-  systolic: reading.systolic,
-  diastolic: reading.diastolic,
-  pulse: reading.pulse,
-  timestamp: new Date(reading.timestamp),
-  note: reading.note,
-});
+const PRESSURE_RULES = {
+  lowSys: 90,
+  lowDia: 60,
+  normalSysMax: 119,
+  normalDiaMax: 79,
+  high1SysMin: 130,
+  high1SysMax: 139,
+  high1DiaMin: 80,
+  high1DiaMax: 89,
+  high2SysMin: 140,
+  high2DiaMin: 90,
+  chartMin: 40,
+  chartMax: 200,
+} as const;
 
 const clamp = (value: unknown, min: number, max: number, fallback: number) => {
   const parsed = typeof value === "number" ? value : Number(value);
@@ -164,13 +157,19 @@ const normalizeMeasurementPreferences = (candidate: MeasurementPreferences): Mea
   };
 };
 
-const classifyPressure = (sys: number, dia: number, pressurePrefs: PressurePreferences): PressureCategory => {
-  if (sys < pressurePrefs.lowSys || dia < pressurePrefs.lowDia) return "low";
-  if (sys >= pressurePrefs.high3Sys || dia >= pressurePrefs.high3Dia) return "high3";
-  if (sys >= pressurePrefs.high2Sys || dia >= pressurePrefs.high2Dia) return "high2";
-  if (sys >= pressurePrefs.high1Sys || dia >= pressurePrefs.high1Dia) return "high1";
-  if (sys >= pressurePrefs.elevatedSys && dia < pressurePrefs.high1Dia) return "elevated";
-  return "normal";
+const classifyPressure = (sys: number, dia: number): PressureCategory => {
+  if (sys >= PRESSURE_RULES.high2SysMin || dia >= PRESSURE_RULES.high2DiaMin) return "high2";
+  if (
+    (sys >= PRESSURE_RULES.high1SysMin && sys <= PRESSURE_RULES.high1SysMax) ||
+    (dia >= PRESSURE_RULES.high1DiaMin && dia <= PRESSURE_RULES.high1DiaMax)
+  ) {
+    return "high1";
+  }
+  if (sys < PRESSURE_RULES.lowSys || dia < PRESSURE_RULES.lowDia) return "low";
+  if (sys <= PRESSURE_RULES.normalSysMax && dia <= PRESSURE_RULES.normalDiaMax) {
+    return "normal";
+  }
+  return "elevated";
 };
 
 const classifyPulse = (pulse: number, pulsePrefs: PulsePreferences): PulseCategory => {
@@ -185,7 +184,6 @@ const getCategoryLabel = (category: PressureCategory): string => {
     elevated: "Podwyższone",
     high1: "Wysokie I°",
     high2: "Wysokie II°",
-    high3: "Wysokie III°",
     low: "Niskie",
   };
 
@@ -196,7 +194,7 @@ const getPulseCategoryLabel = (category: PulseCategory): string => {
   const labels = {
     low: "Niski puls",
     normal: "Puls w normie",
-    high: "Wysoki puls",
+    high: "Puls podwyższony",
   };
 
   return labels[category];
@@ -215,14 +213,59 @@ const getPulseCategoryColor = (category: PulseCategory): string => {
 const getCategoryStyles = (category: PressureCategory) => {
   const styles = {
     normal: { bg: "rgba(48, 209, 88, 0.20)", text: "#30D158", border: "rgba(48,209,88,0.30)" },
-    elevated: { bg: "rgba(255, 214, 10, 0.20)", text: "#FFD60A", border: "rgba(255,214,10,0.30)" },
+    elevated: { bg: "rgba(255, 159, 10, 0.20)", text: "#FF9F0A", border: "rgba(255,159,10,0.30)" },
     high1: { bg: "rgba(255, 159, 10, 0.20)", text: "#FF9F0A", border: "rgba(255,159,10,0.30)" },
     high2: { bg: "rgba(255, 69, 58, 0.20)", text: "#FF453A", border: "rgba(255,69,58,0.30)" },
-    high3: { bg: "rgba(255, 69, 58, 0.20)", text: "#FF453A", border: "rgba(255,69,58,0.30)" },
     low: { bg: "rgba(100, 210, 255, 0.20)", text: "#64D2FF", border: "rgba(100,210,255,0.30)" },
   };
 
   return styles[category];
+};
+
+const toFiniteNumber = (value: unknown): number | null => {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const formatValueOrDash = (value: unknown): string => {
+  const parsed = toFiniteNumber(value);
+  return parsed === null ? "--" : String(Math.round(parsed));
+};
+
+const formatPercentOrDash = (value: unknown): string => {
+  const parsed = toFiniteNumber(value);
+  return parsed === null ? "--" : `${Math.round(parsed)}%`;
+};
+
+const formatDaysLabel = (days: number): string => {
+  if (days === 1) return "1 dzień";
+  return `${days} dni`;
+};
+
+const mapAppError = (error: unknown, fallback: string): string => {
+  if (!(error instanceof Error)) return fallback;
+
+  const lower = error.message.toLowerCase();
+  if (lower.includes("not authenticated")) {
+    return "Sesja wygasła. Zaloguj się ponownie.";
+  }
+  if (lower.includes("invalid credentials")) {
+    return "Nieprawidłowe dane logowania.";
+  }
+  if (lower.includes("must be different")) {
+    return "Nowe hasło musi być inne niż obecne.";
+  }
+  if (lower.includes("missing password")) {
+    return "Uzupełnij wszystkie pola hasła.";
+  }
+  if (lower.includes("account email missing")) {
+    return "Brakuje adresu e-mail konta.";
+  }
+  if (lower.includes("password")) {
+    return "Hasło musi mieć co najmniej 8 znaków.";
+  }
+
+  return fallback;
 };
 
 const formatDate = (date: Date): string => {
@@ -347,7 +390,7 @@ const getStreakGraphic = (current: number, hasTodayEntry: boolean): { src: strin
   };
 };
 
-const getWelcomeLine = (name: string, isReturning: boolean, loginCount: number | null) => {
+const getWelcomeLine = (name: string, loginCount: number) => {
   const firstName = name.trim().split(" ")[0] || "Użytkowniku";
   const variantsReturning = [
     `${firstName}, dobrze Cię znów widzieć`,
@@ -360,10 +403,10 @@ const getWelcomeLine = (name: string, isReturning: boolean, loginCount: number |
     `${firstName}, zaczynamy Twoją historię pomiarów`,
   ];
 
-  if (isReturning || (loginCount ?? 0) > 1) {
-    return variantsReturning[(loginCount ?? 2) % variantsReturning.length];
+  if (loginCount > 1) {
+    return variantsReturning[loginCount % variantsReturning.length];
   }
-  return variantsNew[(loginCount ?? 1) % variantsNew.length];
+  return variantsNew[Math.max(0, loginCount - 1) % variantsNew.length];
 };
 
 const toDateInput = (date: Date): string => {
@@ -425,6 +468,392 @@ const buildCalendarDays = (monthDate: Date): CalendarDayCell[] => {
   });
 };
 
+const useMobileOverscrollLock = (containerRef: React.RefObject<HTMLElement | null>) => {
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    if (typeof window === "undefined" || typeof document === "undefined") return;
+
+    let startY = 0;
+    let startX = 0;
+
+    const handleTouchStart = (event: TouchEvent) => {
+      if (event.touches.length !== 1) return;
+      startY = event.touches[0]?.clientY ?? 0;
+      startX = event.touches[0]?.clientX ?? 0;
+    };
+
+    const handleTouchMove = (event: TouchEvent) => {
+      if (event.touches.length !== 1) return;
+
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("[data-allow-elastic-scroll='true']")) {
+        return;
+      }
+
+      const currentY = event.touches[0]?.clientY ?? 0;
+      const currentX = event.touches[0]?.clientX ?? 0;
+      const deltaY = currentY - startY;
+      const deltaX = Math.abs(currentX - startX);
+
+      if (deltaX > Math.abs(deltaY)) {
+        return;
+      }
+
+      const atTop = container.scrollTop <= 0;
+      const atBottom = Math.ceil(container.scrollTop + container.clientHeight) >= container.scrollHeight;
+
+      if ((atTop && deltaY > 0) || (atBottom && deltaY < 0)) {
+        event.preventDefault();
+      }
+    };
+
+    container.addEventListener("touchstart", handleTouchStart, { passive: true });
+    container.addEventListener("touchmove", handleTouchMove, { passive: false });
+
+    return () => {
+      container.removeEventListener("touchstart", handleTouchStart);
+      container.removeEventListener("touchmove", handleTouchMove);
+    };
+  }, [containerRef]);
+};
+
+// Auth Components
+
+const AuthScreen: React.FC<{
+  view: AuthView;
+  onChangeView: (view: AuthView) => void;
+}> = ({ view, onChangeView }) => {
+  const authScreenRef = useRef<HTMLDivElement>(null);
+  useMobileOverscrollLock(authScreenRef);
+  const { signIn } = useAuthActions();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [verificationCode, setVerificationCode] = useState("");
+  const [awaitsEmailVerification, setAwaitsEmailVerification] = useState(false);
+  const [name, setName] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [success, setSuccess] = useState<string | null>(null);
+
+  const normalizeEmail = (rawEmail: string) => rawEmail.trim().toLowerCase();
+  const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  const mapAuthError = (message: string) => {
+    const lower = message.toLowerCase();
+    if (lower.includes("invalid email") || lower.includes("podaj poprawny adres")) {
+      return "Podaj poprawny adres e-mail.";
+    }
+    if (lower.includes("invalid password") || lower.includes("incorrect password")) {
+      return "Nieprawidłowe hasło.";
+    }
+    if (lower.includes("already exists") || lower.includes("already registered")) {
+      return "Konto z tym adresem e-mail już istnieje.";
+    }
+    if (lower.includes("not found") || lower.includes("no account")) {
+      return "Nie znaleziono konta dla tego adresu e-mail.";
+    }
+    if (lower.includes("password") && lower.includes("least")) {
+      return "Hasło musi mieć co najmniej 8 znaków.";
+    }
+    if (
+      lower.includes("invalid code") ||
+      lower.includes("invalid verification") ||
+      lower.includes("kod") && lower.includes("wygas")
+    ) {
+      return "Kod potwierdzający jest nieprawidłowy lub wygasł.";
+    }
+    if (lower.includes("email verification")) {
+      return "Najpierw potwierdź adres e-mail kodem z wiadomości.";
+    }
+    return "Wystąpił błąd autoryzacji. Spróbuj ponownie.";
+  };
+
+  const handleAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setSuccess(null);
+    setIsLoading(true);
+
+    try {
+      const cleanEmail = normalizeEmail(email);
+      if (!emailPattern.test(cleanEmail)) {
+        throw new Error("Podaj poprawny adres e-mail.");
+      }
+
+      if (!password || password.length < 8) {
+        throw new Error("Hasło musi mieć co najmniej 8 znaków.");
+      }
+
+      if (view === "signup" && password !== confirmPassword) {
+        throw new Error("Hasła nie są takie same.");
+      }
+
+      const formData = new FormData();
+      formData.append("email", cleanEmail);
+      formData.append("password", password);
+      formData.append("flow", view === "signup" ? "signUp" : "signIn");
+      if (view === "signup" && name.trim()) {
+        formData.append("name", name.trim());
+      }
+
+      const result = await signIn("password", formData);
+      if (result.signingIn) {
+        setAwaitsEmailVerification(false);
+        setSuccess(view === "signup" ? "Konto utworzone. Jesteś zalogowany." : "Zalogowano pomyślnie.");
+      } else {
+        setAwaitsEmailVerification(true);
+        setSuccess("Wysłaliśmy kod potwierdzający na Twój email.");
+      }
+    } catch (err) {
+      const rawError = err instanceof Error ? err.message : "Wystąpił błąd logowania.";
+      setError(mapAuthError(rawError));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleVerifyEmailCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setSuccess(null);
+    setIsLoading(true);
+
+    try {
+      const cleanEmail = normalizeEmail(email);
+      if (!emailPattern.test(cleanEmail)) {
+        throw new Error("Podaj poprawny adres e-mail.");
+      }
+      if (!verificationCode.trim()) {
+        throw new Error("Podaj kod potwierdzający.");
+      }
+
+      const formData = new FormData();
+      formData.append("email", cleanEmail);
+      formData.append("flow", "email-verification");
+      formData.append("code", verificationCode.trim());
+
+      const result = await signIn("password", formData);
+      if (result.signingIn) {
+        setAwaitsEmailVerification(false);
+        setSuccess("Adres e-mail został potwierdzony. Jesteś zalogowany.");
+      } else {
+        throw new Error("Kod potwierdzający jest nieprawidłowy lub wygasł.");
+      }
+    } catch (err) {
+      const rawError = err instanceof Error ? err.message : "Nie udało się potwierdzić adresu e-mail.";
+      setError(mapAuthError(rawError));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div
+      ref={authScreenRef}
+      className="h-[100dvh] overflow-y-auto overscroll-none touch-pan-y flex items-center justify-center p-4 relative"
+      style={{ backgroundColor: "#0A0A0A" }}
+    >
+      <BackgroundPaths />
+      <div className="w-full max-w-md relative z-10">
+        <div className="flex justify-center mb-8">
+          <div className="w-20 h-20 rounded-full flex items-center justify-center" style={{ background: "rgba(255, 255, 255, 0.06)" }}>
+            <Heart className="w-10 h-10" style={{ color: "#FF453A" }} />
+          </div>
+        </div>
+
+        <div
+          className="rounded-3xl p-6"
+          style={{
+            background: "rgba(255, 255, 255, 0.06)",
+            backdropFilter: "blur(24px) saturate(180%)",
+            WebkitBackdropFilter: "blur(24px) saturate(180%)",
+            border: "1px solid rgba(255, 255, 255, 0.10)",
+            boxShadow: "0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.12)",
+          }}
+        >
+          <h1 className="text-3xl font-bold text-white text-center mb-1">
+            {awaitsEmailVerification
+              ? "Potwierdź email"
+              : view === "signup"
+              ? "Rejestracja"
+              : "Logowanie"}
+          </h1>
+          <p className="text-center text-white/55 text-sm mb-6">
+            {awaitsEmailVerification
+              ? `Wpisz kod wysłany na ${normalizeEmail(email)}`
+              : view === "signup"
+              ? "Utwórz konto raz i korzystaj na tym urządzeniu bez ponownego logowania."
+              : "Zaloguj się raz, a sesja zostanie zapamiętana na tym urządzeniu."}
+          </p>
+
+          {!awaitsEmailVerification ? (
+            <form onSubmit={handleAuthSubmit} className="space-y-4">
+              {view === "signup" && (
+                <div>
+                  <Label className="text-white/55 text-sm mb-2 block">Nazwa</Label>
+                  <Input
+                    type="text"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF]"
+                    placeholder="Twoje imię"
+                  />
+                </div>
+              )}
+
+              <div>
+                <Label className="text-white/55 text-sm mb-2 block">Email</Label>
+                <Input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF]"
+                  placeholder="twoj@email.pl"
+                  required
+                />
+              </div>
+
+              <div>
+                <Label className="text-white/55 text-sm mb-2 block">Hasło</Label>
+                <Input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF]"
+                  placeholder="Minimum 8 znaków"
+                  required
+                />
+              </div>
+
+              {view === "signup" && (
+                <div>
+                  <Label className="text-white/55 text-sm mb-2 block">Powtórz hasło</Label>
+                  <Input
+                    type="password"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF]"
+                    placeholder="Powtórz hasło"
+                    required
+                  />
+                </div>
+              )}
+
+              <LiquidButton
+                type="submit"
+                className="w-full"
+                variant="default"
+                disabled={isLoading}
+              >
+                {isLoading
+                  ? "Przetwarzanie..."
+                  : view === "signup"
+                  ? "Zarejestruj i zaloguj"
+                  : "Zaloguj się"}
+              </LiquidButton>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setError(null);
+                  setSuccess(null);
+                  setAwaitsEmailVerification(false);
+                  setVerificationCode("");
+                  onChangeView(view === "login" ? "signup" : "login");
+                }}
+                className="w-full text-center text-white/55 text-sm hover:text-white/75 transition-colors"
+              >
+                {view === "login"
+                  ? "Nie masz konta? Zarejestruj się"
+                  : "Masz już konto? Przejdź do logowania"}
+              </button>
+            </form>
+          ) : (
+            <form onSubmit={handleVerifyEmailCode} className="space-y-4">
+              <div>
+                <Label className="text-white/55 text-sm mb-2 block">Kod potwierdzający</Label>
+                <Input
+                  type="text"
+                  value={verificationCode}
+                  onChange={(e) => setVerificationCode(e.target.value)}
+                  className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF] tracking-[0.3em] text-center uppercase"
+                  placeholder="123456"
+                  maxLength={6}
+                  required
+                />
+              </div>
+
+              <LiquidButton
+                type="submit"
+                className="w-full"
+                variant="default"
+                disabled={isLoading}
+              >
+                {isLoading ? "Weryfikowanie..." : "Potwierdź kod"}
+              </LiquidButton>
+
+              <button
+                type="button"
+                className="w-full text-center text-white/55 text-sm hover:text-white/75 transition-colors"
+                onClick={async () => {
+                  setError(null);
+                  setSuccess(null);
+                  setIsLoading(true);
+                  try {
+                    const formData = new FormData();
+                    formData.append("email", normalizeEmail(email));
+                    formData.append("password", password);
+                    formData.append("flow", view === "signup" ? "signUp" : "signIn");
+                    if (view === "signup" && name.trim()) {
+                      formData.append("name", name.trim());
+                    }
+                    await signIn("password", formData);
+                    setSuccess("Wysłaliśmy nowy kod potwierdzający.");
+                  } catch (err) {
+                    const rawError =
+                      err instanceof Error ? err.message : "Nie udało się wysłać nowego kodu.";
+                    setError(mapAuthError(rawError));
+                  } finally {
+                    setIsLoading(false);
+                  }
+                }}
+              >
+                Wyślij kod ponownie
+              </button>
+
+              <button
+                type="button"
+                className="w-full text-center text-white/55 text-sm hover:text-white/75 transition-colors"
+                onClick={() => {
+                  setAwaitsEmailVerification(false);
+                  setVerificationCode("");
+                  setError(null);
+                  setSuccess(null);
+                }}
+              >
+                Wróć do formularza
+              </button>
+            </form>
+          )}
+
+          {error && (
+            <p className="mt-4 text-[#FF9F0A] text-sm text-center">{error}</p>
+          )}
+
+          {success && (
+            <p className="mt-4 text-[#30D158] text-sm text-center">{success}</p>
+          )}
+
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Main UI Components
+
 const ScrollPicker: React.FC<{
   value: number;
   onChange: (value: number) => void;
@@ -433,8 +862,11 @@ const ScrollPicker: React.FC<{
   label: string;
 }> = ({ value, onChange, min, max, label }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const lastPlayedValueRef = useRef<number | null>(null);
+  const lastPlayAtRef = useRef(0);
+  const hasUserInteractedRef = useRef(false);
   const inertiaRafRef = useRef<number | null>(null);
-  const snapAnimRafRef = useRef<number | null>(null);
   const lastScrollTopRef = useRef(0);
   const stableFramesRef = useRef(0);
   const shouldSnapAfterReleaseRef = useRef(false);
@@ -444,6 +876,49 @@ const ScrollPicker: React.FC<{
   const containerHeight = 240;
   const spacerHeight = (containerHeight - itemHeight) / 2;
   const [internalValue, setInternalValue] = useState(value);
+
+  const playSelectionSound = (nextValue: number) => {
+    if (lastPlayedValueRef.current === nextValue) return;
+
+    const now = performance.now();
+    if (now - lastPlayAtRef.current < 40) return;
+
+    const WebAudioContext =
+      typeof window !== "undefined"
+        ? window.AudioContext || (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+        : undefined;
+    if (!WebAudioContext) return;
+
+    try {
+      const ctx = audioContextRef.current ?? new WebAudioContext();
+      audioContextRef.current = ctx;
+
+      if (ctx.state === "suspended") {
+        void ctx.resume();
+      }
+
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      const normalizedRange = Math.max(1, max - min);
+      const position = (nextValue - min) / normalizedRange;
+
+      osc.type = "triangle";
+      osc.frequency.setValueAtTime(520 + position * 120, ctx.currentTime);
+      gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.035, ctx.currentTime + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.09);
+
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 0.1);
+
+      lastPlayAtRef.current = now;
+      lastPlayedValueRef.current = nextValue;
+    } catch {
+      // Audio jest opcjonalne, ignorujemy błędy urządzenia/przeglądarki.
+    }
+  };
 
   const getNearestIndex = (scrollTop: number) => {
     const rawIndex = Math.round(scrollTop / itemHeight);
@@ -460,46 +935,6 @@ const ScrollPicker: React.FC<{
     });
   };
 
-  const animateSnapTo = (targetTop: number) => {
-    if (!containerRef.current) return;
-    if (snapAnimRafRef.current !== null) {
-      window.cancelAnimationFrame(snapAnimRafRef.current);
-      snapAnimRafRef.current = null;
-    }
-
-    const startTop = containerRef.current.scrollTop;
-    const distance = targetTop - startTop;
-    const absDistance = Math.abs(distance);
-
-    if (absDistance < 1.5) {
-      containerRef.current.scrollTop = targetTop;
-      return;
-    }
-
-    const durationMs = Math.min(760, Math.max(420, 420 + absDistance * 4));
-    const startedAt = performance.now();
-    const easeInOutSine = (t: number) => -(Math.cos(Math.PI * t) - 1) / 2;
-
-    const step = (timestamp: number) => {
-      if (!containerRef.current) {
-        snapAnimRafRef.current = null;
-        return;
-      }
-
-      const progress = Math.min((timestamp - startedAt) / durationMs, 1);
-      const eased = easeInOutSine(progress);
-      containerRef.current.scrollTop = startTop + distance * eased;
-
-      if (progress < 1) {
-        snapAnimRafRef.current = window.requestAnimationFrame(step);
-      } else {
-        snapAnimRafRef.current = null;
-      }
-    };
-
-    snapAnimRafRef.current = window.requestAnimationFrame(step);
-  };
-
   const snapToClosest = (behavior: ScrollBehavior = "smooth") => {
     if (!containerRef.current) return;
     const index = getNearestIndex(containerRef.current.scrollTop);
@@ -507,14 +942,15 @@ const ScrollPicker: React.FC<{
     const targetTop = index * itemHeight;
     const distance = Math.abs(containerRef.current.scrollTop - targetTop);
 
-    if (behavior === "auto" || distance < 6) {
+    if (distance < 1.5 || behavior === "auto") {
       containerRef.current.scrollTop = targetTop;
     } else {
-      animateSnapTo(targetTop);
+      containerRef.current.scrollTo({ top: targetTop, behavior });
     }
 
     if (snappedValue !== undefined) {
       setInternalValue(snappedValue);
+      playSelectionSound(snappedValue);
       if (snappedValue !== value) {
         onChange(snappedValue);
       }
@@ -533,8 +969,9 @@ const ScrollPicker: React.FC<{
       if (inertiaRafRef.current !== null) {
         window.cancelAnimationFrame(inertiaRafRef.current);
       }
-      if (snapAnimRafRef.current !== null) {
-        window.cancelAnimationFrame(snapAnimRafRef.current);
+      if (audioContextRef.current) {
+        void audioContextRef.current.close();
+        audioContextRef.current = null;
       }
     };
   }, []);
@@ -587,6 +1024,9 @@ const ScrollPicker: React.FC<{
 
     if (newValue !== undefined && newValue !== value) {
       setInternalValue(newValue);
+      if (hasUserInteractedRef.current) {
+        playSelectionSound(newValue);
+      }
     }
 
     if (!isInteractingRef.current && shouldSnapAfterReleaseRef.current && inertiaRafRef.current === null) {
@@ -595,15 +1035,16 @@ const ScrollPicker: React.FC<{
   };
 
   const handleInteractionStart = () => {
+    hasUserInteractedRef.current = true;
     isInteractingRef.current = true;
     shouldSnapAfterReleaseRef.current = false;
+    if (containerRef.current) {
+      // Przerywa ewentualny trwający smooth snap, żeby od razu oddać kontrolę palcu.
+      containerRef.current.scrollTo({ top: containerRef.current.scrollTop, behavior: "auto" });
+    }
     if (inertiaRafRef.current !== null) {
       window.cancelAnimationFrame(inertiaRafRef.current);
       inertiaRafRef.current = null;
-    }
-    if (snapAnimRafRef.current !== null) {
-      window.cancelAnimationFrame(snapAnimRafRef.current);
-      snapAnimRafRef.current = null;
     }
   };
 
@@ -615,14 +1056,15 @@ const ScrollPicker: React.FC<{
   };
 
   const handleWheel = () => {
+    hasUserInteractedRef.current = true;
     shouldSnapAfterReleaseRef.current = true;
     startInertiaWatcher();
   };
 
   return (
-    <div className="flex flex-col items-center">
+    <div className="flex flex-col items-center flex-1 min-w-0">
       <div className="text-white/55 text-sm mb-2 font-medium">{label}</div>
-      <div className="relative h-[240px] w-[100px]">
+      <div className="relative h-[240px] w-full max-w-[96px]">
         <div
           ref={containerRef}
           onScroll={handleScroll}
@@ -633,9 +1075,11 @@ const ScrollPicker: React.FC<{
           onMouseUp={handleInteractionEnd}
           onMouseLeave={handleInteractionEnd}
           onWheel={handleWheel}
-          className="h-full overflow-y-scroll scrollbar-hide"
+          data-allow-elastic-scroll="true"
+          className="h-full overflow-y-scroll overscroll-none scrollbar-hide"
           style={{
             WebkitOverflowScrolling: "touch",
+            touchAction: "pan-y",
             maskImage: "linear-gradient(to bottom, transparent 0%, white 25%, white 75%, transparent 100%)",
           }}
         >
@@ -646,10 +1090,16 @@ const ScrollPicker: React.FC<{
               className="flex items-center justify-center transition-all duration-300 ease-out"
               style={{
                 height: itemHeight,
-                fontSize: val === internalValue ? "56px" : val >= internalValue - 1 && val <= internalValue + 1 ? "30px" : "22px",
+                fontSize:
+                  val === internalValue
+                    ? "52px"
+                    : val >= internalValue - 1 && val <= internalValue + 1
+                      ? "30px"
+                      : "20px",
                 opacity: val === internalValue ? 1 : val >= internalValue - 1 && val <= internalValue + 1 ? 0.55 : 0.2,
                 fontWeight: val === internalValue ? 650 : 420,
                 lineHeight: 0.95,
+                letterSpacing: "0em",
                 color: "#FFFFFF",
               }}
             >
@@ -676,7 +1126,7 @@ const CategoryBadge: React.FC<{ category: PressureCategory }> = ({ category }) =
 
   return (
     <div
-      className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium"
+      className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium whitespace-nowrap leading-none"
       style={{
         backgroundColor: styles.bg,
         color: styles.text,
@@ -687,6 +1137,63 @@ const CategoryBadge: React.FC<{ category: PressureCategory }> = ({ category }) =
     </div>
   );
 };
+
+const PressureTooltipCard: React.FC<{
+  active?: boolean;
+  payload?: Array<{ payload?: { sys: number; dia: number; pulse: number } }>;
+  label?: string | number;
+}> = ({ active, payload, label }) => {
+  const point = payload?.[0]?.payload;
+  if (!active || !point) return null;
+
+  const category = classifyPressure(point.sys, point.dia);
+  const categoryStyles = getCategoryStyles(category);
+
+  return (
+    <div
+      style={{
+        background: "rgba(20, 20, 20, 0.88)",
+        backdropFilter: "blur(24px)",
+        border: "1px solid rgba(255,255,255,0.12)",
+        borderRadius: "12px",
+        padding: "10px 12px",
+        color: "#FFFFFF",
+        minWidth: "180px",
+      }}
+    >
+      <p style={{ fontSize: "12px", opacity: 0.72, marginBottom: "8px" }}>{label}</p>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: "16px", marginBottom: "6px" }}>
+        <span style={{ color: "#7AB8FF", fontSize: "12px" }}>SYS</span>
+        <span style={{ fontWeight: 700 }}>{formatValueOrDash(point.sys)}</span>
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: "16px", marginBottom: "6px" }}>
+        <span style={{ color: "#FFB454", fontSize: "12px" }}>DIA</span>
+        <span style={{ fontWeight: 700 }}>{formatValueOrDash(point.dia)}</span>
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: "16px", marginBottom: "8px" }}>
+        <span style={{ color: "rgba(255,255,255,0.68)", fontSize: "12px" }}>Puls</span>
+        <span style={{ fontWeight: 600 }}>{formatValueOrDash(point.pulse)} bpm</span>
+      </div>
+      <span
+        style={{
+          display: "inline-block",
+          borderRadius: "999px",
+          padding: "2px 8px",
+          fontSize: "11px",
+          border: `1px solid ${categoryStyles.border}`,
+          background: categoryStyles.bg,
+          color: categoryStyles.text,
+        }}
+      >
+        {getCategoryLabel(category)}
+      </span>
+    </div>
+  );
+};
+
+const SkeletonBar: React.FC<{ className: string }> = ({ className }) => (
+  <div className={`animate-pulse rounded-2xl bg-white/[0.10] ${className}`} />
+);
 
 const GlassCard: React.FC<{ children: React.ReactNode; className?: string }> = ({
   children,
@@ -943,23 +1450,20 @@ const DateTimePicker: React.FC<{
   );
 };
 
+// Main App Component
+
 const BloodPressureApp: React.FC = () => {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [user, setUser] = useState<User | null>(null);
+  const appScrollRef = useRef<HTMLDivElement>(null);
+  useMobileOverscrollLock(appScrollRef);
+  const { signOut } = useAuthActions();
+  const { isAuthenticated, isLoading: isAuthLoading } = useConvexAuth();
+  const [authView, setAuthView] = useState<AuthView>("login");
   const [currentTab, setCurrentTab] = useState<AppTab>("dashboard");
-  const [readings, setReadings] = useState<BloodPressureReading[]>([]);
   const [showSuccess, setShowSuccess] = useState(false);
-  const [isSyncing, setIsSyncing] = useState(false);
   const [dataSyncError, setDataSyncError] = useState<string | null>(null);
 
-  const [email, setEmail] = useState("");
-  const [name, setName] = useState("");
-  const [age, setAge] = useState<string>("");
-  const [loginCode, setLoginCode] = useState("");
-  const [isCodeStage, setIsCodeStage] = useState(false);
-  const [devCodeHint, setDevCodeHint] = useState<string | null>(null);
-  const [isReturningUser, setIsReturningUser] = useState(false);
-  const [loginCount, setLoginCount] = useState<number | null>(null);
+  // Auth state from Convex
+  const userData = useQuery(api.authHelpers.getUser);
 
   const [systolic, setSystolic] = useState(120);
   const [diastolic, setDiastolic] = useState(80);
@@ -970,11 +1474,27 @@ const BloodPressureApp: React.FC = () => {
   const [timeRange, setTimeRange] = useState<TimeRange>("7d");
   const [showSettings, setShowSettings] = useState(false);
   const [settingsSections, setSettingsSections] = useState<Record<SettingsSectionKey, boolean>>({
-    pressure: false,
     pulse: false,
   });
   const [preferences, setPreferences] = useState<MeasurementPreferences>(defaultMeasurementPreferences);
   const [draftPreferences, setDraftPreferences] = useState<MeasurementPreferences>(preferences);
+  const [pendingDeleteReadingId, setPendingDeleteReadingId] = useState<Id<"readings"> | null>(null);
+  const [isDeletingReading, setIsDeletingReading] = useState(false);
+  const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
+  const [currentPasswordInput, setCurrentPasswordInput] = useState("");
+  const [newPasswordInput, setNewPasswordInput] = useState("");
+  const [confirmNewPasswordInput, setConfirmNewPasswordInput] = useState("");
+  const [isChangingPassword, setIsChangingPassword] = useState(false);
+  const [showDeleteAccountModal, setShowDeleteAccountModal] = useState(false);
+  const [isDeletingAccount, setIsDeletingAccount] = useState(false);
+  const [deleteAccountConfirmText, setDeleteAccountConfirmText] = useState("");
+
+  // Convex mutations
+  const addReadingMutation = useMutation(api.readings.add);
+  const deleteReadingMutation = useMutation(api.readings.remove);
+  const savePreferencesMutation = useMutation(api.preferences.save);
+  const deleteAccountMutation = useMutation(api.account.deleteAccount);
+  const changePasswordAction = useAction(api.account.changePassword);
 
   const menuItems: InteractiveMenuItem[] = [
     { label: "Dashboard", icon: Home },
@@ -1004,7 +1524,6 @@ const BloodPressureApp: React.FC = () => {
     if (showSettings) {
       setDraftPreferences(preferences);
       setSettingsSections({
-        pressure: false,
         pulse: false,
       });
     }
@@ -1030,147 +1549,27 @@ const BloodPressureApp: React.FC = () => {
     }));
   };
 
-  const applyPressureRangeDraft = (next: {
-    lowSys: number;
-    lowDia: number;
-    highSys: number;
-    highDia: number;
-  }) => {
-    const elevatedSys = Math.max(next.lowSys + 1, next.highSys - 10);
-    const high2Sys = Math.max(next.highSys + 1, next.highSys + 10);
-    const high3Sys = Math.max(high2Sys + 1, next.highSys + 30);
-    const high2Dia = Math.max(next.highDia + 1, next.highDia + 10);
-    const high3Dia = Math.max(high2Dia + 1, next.highDia + 20);
-
-    setDraftPreferences((prev) => ({
-      ...prev,
-      pressure: {
-        ...prev.pressure,
-        lowSys: next.lowSys,
-        lowDia: next.lowDia,
-        elevatedSys,
-        high1Sys: next.highSys,
-        high1Dia: next.highDia,
-        high2Sys,
-        high2Dia,
-        high3Sys,
-        high3Dia,
-      },
-    }));
-  };
-
-  const handleRequestLoginCode = async () => {
-    if (!email.trim()) {
-      setDataSyncError("Podaj adres e-mail.");
-      return;
-    }
-    if (!name.trim()) {
-      setDataSyncError("Podaj imię.");
-      return;
-    }
-    const parsedAge = Number.parseInt(age, 10);
-    if (!Number.isFinite(parsedAge) || parsedAge < 18 || parsedAge > 120) {
-      setDataSyncError("Podaj poprawny wiek (18-120).");
-      return;
-    }
-    setIsSyncing(true);
-    setDataSyncError(null);
-
+  const handleLogout = async () => {
+    setShowSettings(false);
     try {
-      const result = await requestLoginCodeRemote(email.trim());
-      setIsCodeStage(true);
-      setLoginCode("");
-      setDevCodeHint(result.devCode ?? null);
+      await signOut();
+      setCurrentTab("dashboard");
       setDataSyncError(null);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Nie udało się wysłać kodu logowania.";
-      setDataSyncError(message);
-    } finally {
-      setIsSyncing(false);
+      setDataSyncError(mapAppError(error, "Nie udało się wylogować."));
     }
-  };
-
-  const handleVerifyLogin = async () => {
-    if (!email.trim() || !loginCode.trim()) {
-      setDataSyncError("Wpisz kod z e-maila.");
-      return;
-    }
-    setIsSyncing(true);
-    setDataSyncError(null);
-
-    try {
-      const parsedAge = Number.parseInt(age, 10);
-      const safeAge = Number.isFinite(parsedAge) ? Math.max(18, Math.min(120, parsedAge)) : undefined;
-      const auth = await verifyLoginCodeRemote(email.trim(), loginCode.trim(), name.trim() || undefined, safeAge);
-      setUser({
-        id: auth.user.id,
-        email: auth.user.email,
-        name: auth.user.name,
-        age: auth.user.age,
-      });
-      setIsReturningUser(auth.isReturning);
-      setLoginCount(auth.loginCount);
-
-      const remoteState = await getUserStateRemote(auth.user.id);
-      setIsAuthenticated(true);
-      setReadings(
-        remoteState.readings
-          .map(mapRemoteReading)
-          .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
-      );
-      setPreferences(
-        remoteState.preferences
-          ? normalizeMeasurementPreferences(mapRemotePreferences(remoteState.preferences))
-          : defaultMeasurementPreferences
-      );
-      setEmail(auth.user.email);
-      setName(auth.user.name);
-      setAge(auth.user.age ? String(auth.user.age) : "");
-      setIsCodeStage(false);
-      setLoginCode("");
-      setDevCodeHint(null);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Nie udało się zalogować.";
-      setDataSyncError(message);
-      setReadings([]);
-      setPreferences(defaultMeasurementPreferences);
-      setUser(null);
-      setIsAuthenticated(false);
-    } finally {
-      setIsSyncing(false);
-    }
-  };
-
-  const handleLogout = () => {
-    setShowSettings(false);
-    setIsAuthenticated(false);
-    setUser(null);
-    setName("");
-    setAge("");
-    setEmail("");
-    setCurrentTab("dashboard");
-    setReadings([]);
-    setIsCodeStage(false);
-    setLoginCode("");
-    setDevCodeHint(null);
-    setIsReturningUser(false);
-    setLoginCount(null);
-    setDataSyncError(null);
-    setIsSyncing(false);
   };
 
   const handleSavePreferences = async () => {
     const normalized = normalizeMeasurementPreferences(draftPreferences);
-    if (!user) return;
 
     try {
-      await savePreferencesRemote(user.id, normalized);
+      await savePreferencesMutation({ preferences: normalized });
       setPreferences(normalized);
       setShowSettings(false);
       setDataSyncError(null);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Nie udało się zapisać progów.";
-      setDataSyncError(message);
+      setDataSyncError(mapAppError(error, "Nie udało się zapisać ustawień."));
     }
   };
 
@@ -1179,13 +1578,11 @@ const BloodPressureApp: React.FC = () => {
     setPreferences(normalized);
     setDraftPreferences(normalized);
     setShowSettings(false);
-    if (!user) return;
     try {
-      await savePreferencesRemote(user.id, normalized);
+      await savePreferencesMutation({ preferences: normalized });
       setDataSyncError(null);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Nie udało się zapisać progów.";
-      setDataSyncError(message);
+      setDataSyncError(mapAppError(error, "Nie udało się zapisać ustawień."));
     }
   };
 
@@ -1196,12 +1593,12 @@ const BloodPressureApp: React.FC = () => {
   const handleExportData = () => {
     const payload = {
       exportedAt: new Date().toISOString(),
-      user,
+      user: userData,
       preferences,
       readings: readings.map((reading) => ({
         ...reading,
         timestamp: reading.timestamp.toISOString(),
-        pressureCategory: classifyPressure(reading.systolic, reading.diastolic, preferences.pressure),
+        pressureCategory: classifyPressure(reading.systolic, reading.diastolic),
         pulseCategory: classifyPulse(reading.pulse, preferences.pulse),
       })),
     };
@@ -1219,14 +1616,12 @@ const BloodPressureApp: React.FC = () => {
     URL.revokeObjectURL(url);
   };
 
-  const getPressureCategory = (sys: number, dia: number) => classifyPressure(sys, dia, preferences.pressure);
+  const getPressureCategory = (sys: number, dia: number) => classifyPressure(sys, dia);
   const getPulseCategory = (pulseValue: number) => classifyPulse(pulseValue, preferences.pulse);
 
   const handleAddReading = async () => {
-    if (!user) return;
-
     try {
-      const saved = await addReadingRemote(user.id, {
+      await addReadingMutation({
         systolic,
         diastolic,
         pulse,
@@ -1234,7 +1629,6 @@ const BloodPressureApp: React.FC = () => {
         note: note.trim() || undefined,
       });
 
-      setReadings((prev) => [mapRemoteReading(saved), ...prev]);
       setShowSuccess(true);
       setDataSyncError(null);
 
@@ -1248,23 +1642,132 @@ const BloodPressureApp: React.FC = () => {
         setReadingDate(new Date());
       }, 1500);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Nie udało się zapisać pomiaru.";
-      setDataSyncError(message);
+      setDataSyncError(mapAppError(error, "Nie udało się zapisać pomiaru."));
     }
   };
 
-  const handleDeleteReading = async (id: string) => {
-    if (!user) return;
-
+  const handleDeleteReading = async (id: Id<"readings">) => {
+    setIsDeletingReading(true);
     try {
-      await deleteReadingRemote(user.id, id);
-      setReadings((prev) => prev.filter((reading) => reading.id !== id));
+      await deleteReadingMutation({ id });
+      setPendingDeleteReadingId(null);
       setDataSyncError(null);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Nie udało się usunąć pomiaru.";
-      setDataSyncError(message);
+      setDataSyncError(mapAppError(error, "Nie udało się usunąć pomiaru."));
+    } finally {
+      setIsDeletingReading(false);
     }
   };
+
+  const handleConfirmDeleteReading = async () => {
+    if (!pendingDeleteReadingId) return;
+    await handleDeleteReading(pendingDeleteReadingId);
+  };
+
+  const handleChangePassword = async () => {
+    setDataSyncError(null);
+
+    if (!currentPasswordInput || !newPasswordInput || !confirmNewPasswordInput) {
+      setDataSyncError("Uzupełnij wszystkie pola hasła.");
+      return;
+    }
+    if (newPasswordInput.length < 8) {
+      setDataSyncError("Nowe hasło musi mieć co najmniej 8 znaków.");
+      return;
+    }
+    if (newPasswordInput !== confirmNewPasswordInput) {
+      setDataSyncError("Nowe hasła nie są takie same.");
+      return;
+    }
+    if (currentPasswordInput === newPasswordInput) {
+      setDataSyncError("Nowe hasło musi być inne niż obecne.");
+      return;
+    }
+
+    setIsChangingPassword(true);
+    try {
+      await changePasswordAction({
+        currentPassword: currentPasswordInput,
+        newPassword: newPasswordInput,
+      });
+      setShowChangePasswordModal(false);
+      setCurrentPasswordInput("");
+      setNewPasswordInput("");
+      setConfirmNewPasswordInput("");
+      setDataSyncError(null);
+      setShowSuccess(true);
+      window.setTimeout(() => setShowSuccess(false), 1200);
+    } catch (error) {
+      setDataSyncError(mapAppError(error, "Nie udało się zmienić hasła."));
+    } finally {
+      setIsChangingPassword(false);
+    }
+  };
+
+  const handleDeleteAccount = async () => {
+    if (deleteAccountConfirmText.trim().toUpperCase() !== "USUN") {
+      setDataSyncError("Aby usunąć konto wpisz dokładnie: USUN");
+      return;
+    }
+
+    setIsDeletingAccount(true);
+    try {
+      await deleteAccountMutation({});
+      await signOut();
+      setShowDeleteAccountModal(false);
+      setDeleteAccountConfirmText("");
+      setCurrentTab("dashboard");
+      setDataSyncError(null);
+    } catch (error) {
+      setDataSyncError(mapAppError(error, "Nie udało się usunąć konta."));
+    } finally {
+      setIsDeletingAccount(false);
+    }
+  };
+
+  // Transform Convex data
+  const readings: BloodPressureReading[] = useMemo(() => {
+    if (!userData?.readings) return [];
+    return userData.readings
+      .map((r: any): BloodPressureReading | null => {
+        const systolicValue = toFiniteNumber(r.systolic);
+        const diastolicValue = toFiniteNumber(r.diastolic);
+        const pulseValue = toFiniteNumber(r.pulse);
+        const timestamp = new Date(r.timestamp);
+
+        if (
+          systolicValue === null ||
+          diastolicValue === null ||
+          pulseValue === null ||
+          !isValidDate(timestamp)
+        ) {
+          return null;
+        }
+
+        return {
+          id: r._id,
+          systolic: Math.round(systolicValue),
+          diastolic: Math.round(diastolicValue),
+          pulse: Math.round(pulseValue),
+          timestamp,
+          note: typeof r.note === "string" ? r.note : undefined,
+        };
+      })
+      .filter((reading): reading is BloodPressureReading => reading !== null)
+      .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+  }, [userData?.readings]);
+
+  // Load preferences from user data
+  useEffect(() => {
+    if (userData?.preferences) {
+      const prefs = normalizeMeasurementPreferences({
+        pressure: userData.preferences.pressure as PressurePreferences,
+        pulse: userData.preferences.pulse as PulsePreferences,
+      });
+      setPreferences(prefs);
+      setDraftPreferences(prefs);
+    }
+  }, [userData?.preferences]);
 
   const filteredReadings = useMemo(() => {
     const rangeStart = getRangeStart(timeRange, new Date());
@@ -1321,131 +1824,48 @@ const BloodPressureApp: React.FC = () => {
     const avgDia = Math.round(filteredReadings.reduce((sum, reading) => sum + reading.diastolic, 0) / filteredReadings.length);
     const avgPulse = Math.round(filteredReadings.reduce((sum, reading) => sum + reading.pulse, 0) / filteredReadings.length);
     const normalCount = filteredReadings.filter(
-      (reading) => classifyPressure(reading.systolic, reading.diastolic, preferences.pressure) === "normal"
+      (reading) => classifyPressure(reading.systolic, reading.diastolic) === "normal"
     ).length;
     const normalPercent = Math.round((normalCount / filteredReadings.length) * 100);
 
     return { avgSys, avgDia, avgPulse, normalPercent };
-  }, [filteredReadings, preferences.pressure]);
+  }, [filteredReadings]);
+
+  const analyticsYDomain: [number, number] = [PRESSURE_RULES.chartMin, PRESSURE_RULES.chartMax];
+  const pressureZones: Array<{ key: string; y1: number; y2: number; fill: string }> = [
+    { key: "normal", y1: PRESSURE_RULES.lowDia, y2: PRESSURE_RULES.normalSysMax, fill: "rgba(48, 209, 88, 0.08)" },
+    { key: "high2", y1: PRESSURE_RULES.high2SysMin, y2: PRESSURE_RULES.chartMax, fill: "rgba(255, 69, 58, 0.10)" },
+  ];
 
   const latestPulseCategory =
     readings.length > 0 ? getPulseCategory(readings[0].pulse) : null;
   const streak = useMemo(() => calculateStreak(readings), [readings]);
   const streakGraphic = getStreakGraphic(streak.current, streak.hasTodayEntry);
   const localNow = new Date();
-  const welcomeLine = getWelcomeLine(user?.name ?? "Użytkowniku", isReturningUser, loginCount);
+  const welcomeLine = getWelcomeLine(userData?.name ?? "Użytkowniku", userData?.loginCount ?? 0);
+  const isUserDataLoading = isAuthenticated && userData === undefined;
 
-  if (!isAuthenticated) {
+  if (isAuthLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center p-4 relative" style={{ backgroundColor: "#0A0A0A" }}>
-        <BackgroundPaths />
-        <div className="w-full max-w-md relative z-10">
-          <div className="flex justify-center mb-8">
-            <div className="w-20 h-20 rounded-full flex items-center justify-center" style={{ background: "rgba(255, 255, 255, 0.06)" }}>
-              <Heart className="w-10 h-10" style={{ color: "#FF453A" }} />
-            </div>
-          </div>
-
-          <GlassCard>
-            <h1 className="text-3xl font-bold text-white text-center mb-1">Logowanie</h1>
-            <p className="text-center text-white/55 text-sm mb-6">Kod potwierdzający wysyłamy na e-mail.</p>
-
-            <div className="space-y-4">
-              {!isCodeStage && (
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="col-span-2">
-                    <Label className="text-white/55 text-sm mb-2 block">Imię</Label>
-                    <Input
-                      type="text"
-                      value={name}
-                      onChange={(event) => setName(event.target.value)}
-                      className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF]"
-                      placeholder="Twoje imię"
-                    />
-                  </div>
-                  <div className="col-span-2">
-                    <Label className="text-white/55 text-sm mb-2 block">Wiek (18+)</Label>
-                    <Input
-                      type="number"
-                      inputMode="numeric"
-                      min={18}
-                      max={120}
-                      value={age}
-                      onChange={(event) => setAge(event.target.value)}
-                      className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF]"
-                      placeholder="np. 34"
-                    />
-                  </div>
-                </div>
-              )}
-
-              <div>
-                <Label className="text-white/55 text-sm mb-2 block">Email</Label>
-                <Input
-                  type="email"
-                  value={email}
-                  onChange={(event) => setEmail(event.target.value)}
-                  className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF]"
-                  placeholder="twoj@email.pl"
-                />
-              </div>
-
-              {isCodeStage && (
-                <div className="space-y-2">
-                  <Label className="text-white/55 text-sm mb-2 block">Kod z e-maila</Label>
-                  <Input
-                    type="text"
-                    value={loginCode}
-                    onChange={(event) => setLoginCode(event.target.value.replace(/\s+/g, ""))}
-                    className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF] tracking-[0.3em] uppercase"
-                    placeholder="123456"
-                    maxLength={6}
-                  />
-                  {devCodeHint && (
-                    <p className="text-[#7AB8FF] text-xs">
-                      Tryb developerski: kod to <span className="font-semibold">{devCodeHint}</span>
-                    </p>
-                  )}
-                </div>
-              )}
-
-              <LiquidButton
-                onClick={isCodeStage ? handleVerifyLogin : handleRequestLoginCode}
-                className="w-full"
-                variant="default"
-                disabled={isSyncing}
-              >
-                {isSyncing
-                  ? "Łączenie z bazą..."
-                  : isCodeStage
-                    ? "Potwierdź i wejdź"
-                    : "Wyślij kod logowania"}
-              </LiquidButton>
-              {isCodeStage && (
-                <button
-                  onClick={() => {
-                    setIsCodeStage(false);
-                    setLoginCode("");
-                    setDevCodeHint(null);
-                  }}
-                  className="w-full text-center text-white/55 text-sm hover:text-white/75 transition-colors"
-                >
-                  Zmień e-mail
-                </button>
-              )}
-              {dataSyncError && (
-                <p className="text-[#FF9F0A] text-sm text-center">{dataSyncError}</p>
-              )}
-            </div>
-          </GlassCard>
+      <div className="h-[100dvh] flex items-center justify-center" style={{ backgroundColor: "#0A0A0A" }}>
+        <div className="w-full max-w-[430px] px-6 space-y-4">
+          <SkeletonBar className="h-9 w-48" />
+          <SkeletonBar className="h-28 w-full" />
+          <SkeletonBar className="h-44 w-full" />
         </div>
       </div>
     );
   }
 
+  // Show auth screen if not authenticated
+  if (!isAuthenticated) {
+    return <AuthScreen view={authView} onChangeView={setAuthView} />;
+  }
+
   return (
     <div
-      className="min-h-screen pb-24 relative"
+      ref={appScrollRef}
+      className="h-[100dvh] overflow-y-auto overscroll-none touch-pan-y pb-32 relative"
       style={{ backgroundColor: "#0A0A0A", fontFamily: "-apple-system, SF Pro Display, system-ui" }}
     >
       <BackgroundPaths />
@@ -1460,6 +1880,22 @@ const BloodPressureApp: React.FC = () => {
               >
                 <Check className="w-12 h-12" style={{ color: "#30D158", strokeWidth: 3 }} />
               </div>
+            </div>
+          </div>
+        )}
+
+        {dataSyncError && (
+          <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 px-3 w-full max-w-[420px]">
+            <div className="rounded-2xl border border-[#FF9F0A]/35 bg-[#FF9F0A]/12 text-[#FFD6A3] text-sm px-4 py-3 flex items-start justify-between gap-3">
+              <span>{dataSyncError}</span>
+              <button
+                type="button"
+                className="text-[#FFD6A3]/75 hover:text-[#FFD6A3]"
+                onClick={() => setDataSyncError(null)}
+                aria-label="Zamknij komunikat"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
           </div>
         )}
@@ -1479,7 +1915,7 @@ const BloodPressureApp: React.FC = () => {
                 <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between">
                   <div>
                     <p className="text-white text-lg font-semibold">Ustawienia</p>
-                    <p className="text-white/45 text-xs">Dopasuj progi klasyfikacji</p>
+                    <p className="text-white/45 text-xs">Konto i preferencje użytkownika</p>
                   </div>
                   <button
                     onClick={() => {
@@ -1494,67 +1930,9 @@ const BloodPressureApp: React.FC = () => {
 
                 <div className="px-5 py-5 space-y-5">
                   <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
-                    <p className="text-white text-sm font-semibold mb-1">{user?.name}</p>
-                    <p className="text-white/50 text-xs">{user?.email}</p>
+                    <p className="text-white text-sm font-semibold mb-1">{userData?.name}</p>
+                    <p className="text-white/50 text-xs">{userData?.email}</p>
                   </div>
-
-                  <SettingsSection
-                    title="Zakres ciśnienia"
-                    description="Podaj granice niskiego i wysokiego ciśnienia — klasyfikacja wylicza się automatycznie"
-                    isOpen={settingsSections.pressure}
-                    onToggle={() => toggleSettingsSection("pressure")}
-                  >
-                    <div className="grid grid-cols-2 gap-3">
-                      <SettingsField
-                        label="Niskie SYS (<)"
-                        value={draftPreferences.pressure.lowSys}
-                        onChange={(next) =>
-                          applyPressureRangeDraft({
-                            lowSys: numberFromInput(next, draftPreferences.pressure.lowSys),
-                            lowDia: draftPreferences.pressure.lowDia,
-                            highSys: draftPreferences.pressure.high1Sys,
-                            highDia: draftPreferences.pressure.high1Dia,
-                          })
-                        }
-                      />
-                      <SettingsField
-                        label="Niskie DIA (<)"
-                        value={draftPreferences.pressure.lowDia}
-                        onChange={(next) =>
-                          applyPressureRangeDraft({
-                            lowSys: draftPreferences.pressure.lowSys,
-                            lowDia: numberFromInput(next, draftPreferences.pressure.lowDia),
-                            highSys: draftPreferences.pressure.high1Sys,
-                            highDia: draftPreferences.pressure.high1Dia,
-                          })
-                        }
-                      />
-                      <SettingsField
-                        label="Wysokie SYS (>=)"
-                        value={draftPreferences.pressure.high1Sys}
-                        onChange={(next) =>
-                          applyPressureRangeDraft({
-                            lowSys: draftPreferences.pressure.lowSys,
-                            lowDia: draftPreferences.pressure.lowDia,
-                            highSys: numberFromInput(next, draftPreferences.pressure.high1Sys),
-                            highDia: draftPreferences.pressure.high1Dia,
-                          })
-                        }
-                      />
-                      <SettingsField
-                        label="Wysokie DIA (>=)"
-                        value={draftPreferences.pressure.high1Dia}
-                        onChange={(next) =>
-                          applyPressureRangeDraft({
-                            lowSys: draftPreferences.pressure.lowSys,
-                            lowDia: draftPreferences.pressure.lowDia,
-                            highSys: draftPreferences.pressure.high1Sys,
-                            highDia: numberFromInput(next, draftPreferences.pressure.high1Dia),
-                          })
-                        }
-                      />
-                    </div>
-                  </SettingsSection>
 
                   <SettingsSection
                     title="Zakres pulsu"
@@ -1587,11 +1965,157 @@ const BloodPressureApp: React.FC = () => {
                       </SettingsActionButton>
                     </div>
                     <div className="w-full max-w-[280px]">
+                      <SettingsActionButton icon={KeyRound} onClick={() => setShowChangePasswordModal(true)}>
+                        Zmień hasło
+                      </SettingsActionButton>
+                    </div>
+                    <div className="w-full max-w-[280px]">
+                      <SettingsActionButton icon={UserX} onClick={() => setShowDeleteAccountModal(true)}>
+                        Usuń konto
+                      </SettingsActionButton>
+                    </div>
+                    <div className="w-full max-w-[280px]">
                       <SettingsActionButton icon={LogOut} onClick={handleLogout}>
                         Wyloguj się
                       </SettingsActionButton>
                     </div>
                   </div>
+                </div>
+              </GlassCard>
+            </div>
+          </div>
+        )}
+
+        {pendingDeleteReadingId && (
+          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm p-4 flex items-center justify-center">
+            <div className="w-full max-w-sm" onClick={(event) => event.stopPropagation()}>
+              <GlassCard className="p-5">
+                <h3 className="text-white text-lg font-semibold mb-2">Usuń pomiar</h3>
+                <p className="text-white/65 text-sm mb-5">Czy na pewno chcesz usunąć ten pomiar?</p>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setPendingDeleteReadingId(null)}
+                    className="h-11 rounded-xl border border-white/10 bg-white/5 text-white/85 hover:bg-white/10 transition-colors"
+                    disabled={isDeletingReading}
+                  >
+                    Anuluj
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleConfirmDeleteReading();
+                    }}
+                    className="h-11 rounded-xl border border-[#FF453A]/50 bg-[#FF453A]/20 text-[#FFB4AF] hover:bg-[#FF453A]/30 transition-colors"
+                    disabled={isDeletingReading}
+                  >
+                    {isDeletingReading ? "Usuwanie..." : "Usuń"}
+                  </button>
+                </div>
+              </GlassCard>
+            </div>
+          </div>
+        )}
+
+        {showChangePasswordModal && (
+          <div
+            className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm p-4 flex items-end sm:items-center justify-center"
+            onClick={() => setShowChangePasswordModal(false)}
+          >
+            <div className="w-full max-w-md" onClick={(event) => event.stopPropagation()}>
+              <GlassCard className="p-5 space-y-4">
+                <h3 className="text-white text-lg font-semibold">Zmień hasło</h3>
+                <div>
+                  <Label className="text-white/55 text-sm mb-2 block">Obecne hasło</Label>
+                  <Input
+                    type="password"
+                    value={currentPasswordInput}
+                    onChange={(event) => setCurrentPasswordInput(event.target.value)}
+                    className="bg-white/5 border-white/10 text-white"
+                  />
+                </div>
+                <div>
+                  <Label className="text-white/55 text-sm mb-2 block">Nowe hasło</Label>
+                  <Input
+                    type="password"
+                    value={newPasswordInput}
+                    onChange={(event) => setNewPasswordInput(event.target.value)}
+                    className="bg-white/5 border-white/10 text-white"
+                  />
+                </div>
+                <div>
+                  <Label className="text-white/55 text-sm mb-2 block">Powtórz nowe hasło</Label>
+                  <Input
+                    type="password"
+                    value={confirmNewPasswordInput}
+                    onChange={(event) => setConfirmNewPasswordInput(event.target.value)}
+                    className="bg-white/5 border-white/10 text-white"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setShowChangePasswordModal(false)}
+                    className="h-11 rounded-xl border border-white/10 bg-white/5 text-white/85 hover:bg-white/10 transition-colors"
+                    disabled={isChangingPassword}
+                  >
+                    Anuluj
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleChangePassword();
+                    }}
+                    className="h-11 rounded-xl border border-[#0A84FF]/40 bg-[#0A84FF]/20 text-[#B7D8FF] hover:bg-[#0A84FF]/30 transition-colors"
+                    disabled={isChangingPassword}
+                  >
+                    {isChangingPassword ? "Zmiana..." : "Zmień"}
+                  </button>
+                </div>
+              </GlassCard>
+            </div>
+          </div>
+        )}
+
+        {showDeleteAccountModal && (
+          <div
+            className="fixed inset-0 z-50 bg-black/65 backdrop-blur-sm p-4 flex items-end sm:items-center justify-center"
+            onClick={() => setShowDeleteAccountModal(false)}
+          >
+            <div className="w-full max-w-md" onClick={(event) => event.stopPropagation()}>
+              <GlassCard className="p-5 space-y-4">
+                <h3 className="text-[#FFB4AF] text-lg font-semibold">Usuń konto</h3>
+                <p className="text-white/70 text-sm">
+                  Usuniemy Twoje konto i wszystkie pomiary. Tej operacji nie da się cofnąć.
+                </p>
+                <div>
+                  <Label className="text-white/55 text-sm mb-2 block">Wpisz USUN, aby potwierdzić</Label>
+                  <Input
+                    type="text"
+                    value={deleteAccountConfirmText}
+                    onChange={(event) => setDeleteAccountConfirmText(event.target.value)}
+                    className="bg-white/5 border-white/10 text-white uppercase"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setShowDeleteAccountModal(false)}
+                    className="h-11 rounded-xl border border-white/10 bg-white/5 text-white/85 hover:bg-white/10 transition-colors"
+                    disabled={isDeletingAccount}
+                  >
+                    Anuluj
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleDeleteAccount();
+                    }}
+                    className="h-11 rounded-xl border border-[#FF453A]/50 bg-[#FF453A]/20 text-[#FFB4AF] hover:bg-[#FF453A]/30 transition-colors"
+                    disabled={isDeletingAccount}
+                  >
+                    {isDeletingAccount ? "Usuwanie..." : "Usuń konto"}
+                  </button>
                 </div>
               </GlassCard>
             </div>
@@ -1614,109 +2138,125 @@ const BloodPressureApp: React.FC = () => {
               </button>
             </div>
 
-            <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <img
-                  src={streakGraphic.src}
-                  alt={streakGraphic.alt}
-                  className="w-10 h-10 object-contain"
-                  loading="lazy"
-                  decoding="async"
-                />
-                <div>
-                  <p className="text-white text-sm font-medium">Passa</p>
-                  <p className="text-white/45 text-xs">rekord: {streak.best} dni</p>
-                </div>
-              </div>
-              <div className="text-right">
-                <p className="text-white text-2xl font-semibold tabular-nums leading-none">{streak.current}</p>
-                <p className="text-white/45 text-xs">{streak.hasTodayEntry ? "dzisiaj ok" : "brak dziś"}</p>
-              </div>
-            </div>
-
-            {readings.length === 0 ? (
-              <GlassCard>
-                <div className="text-center py-8">
-                  <Heart className="w-16 h-16 mx-auto mb-4 text-white/30" />
-                  <h3 className="text-white text-xl font-semibold mb-2">Brak pomiarów</h3>
-                  <p className="text-white/55 mb-6">Dodaj swój pierwszy pomiar ciśnienia</p>
-                  <LiquidButton onClick={() => setCurrentTab("add")} variant="default" size="sm">
-                    Dodaj pomiar
-                  </LiquidButton>
-                </div>
-              </GlassCard>
+            {isUserDataLoading ? (
+              <>
+                <SkeletonBar className="h-20 w-full" />
+                <SkeletonBar className="h-64 w-full" />
+                <SkeletonBar className="h-56 w-full" />
+              </>
             ) : (
               <>
-                <GlassCard>
-                  <h2 className="text-white/55 text-sm font-medium mb-4">Ostatni pomiar</h2>
-                  <div className="flex items-center justify-center mb-4">
-                    <span className="text-white font-bold" style={{ fontSize: "72px", letterSpacing: "-2px" }}>
-                      {readings[0].systolic}
-                    </span>
-                    <span className="text-white/55 font-bold text-5xl mx-2">/</span>
-                    <span className="text-white font-bold" style={{ fontSize: "72px", letterSpacing: "-2px" }}>
-                      {readings[0].diastolic}
-                    </span>
+                <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <img
+                      src={streakGraphic.src}
+                      alt={streakGraphic.alt}
+                      className="w-10 h-10 object-contain"
+                      loading="lazy"
+                      decoding="async"
+                    />
+                    <div>
+                      <p className="text-white text-sm font-medium">Passa</p>
+                      <p className="text-white/45 text-xs">rekord: {formatDaysLabel(streak.best)}</p>
+                    </div>
                   </div>
-
-                  <div className="flex items-center justify-center gap-2 mb-4">
-                    <Heart className="w-5 h-5 text-white/55" />
-                    <span className="text-white text-2xl font-semibold">{readings[0].pulse}</span>
-                    <span className="text-white/55 text-lg">bpm</span>
+                  <div className="text-right">
+                    <p className="text-white text-2xl font-semibold tabular-nums leading-none">{formatValueOrDash(streak.current)}</p>
+                    <p className="text-white/45 text-xs">{streak.hasTodayEntry ? "dzisiaj ok" : "brak dziś"}</p>
                   </div>
-                  {latestPulseCategory && (
-                    <p
-                      className="text-sm text-center mb-3"
-                      style={{ color: getPulseCategoryColor(latestPulseCategory) }}
-                    >
-                      {getPulseCategoryLabel(latestPulseCategory)}
-                    </p>
-                  )}
+                </div>
 
-                  <div className="flex justify-center mb-3">
-                    <CategoryBadge category={getPressureCategory(readings[0].systolic, readings[0].diastolic)} />
-                  </div>
-
-                  <p className="text-white/30 text-center text-sm">
-                    {formatTime(readings[0].timestamp)} • {formatDate(readings[0].timestamp)}
-                  </p>
-                </GlassCard>
-
-                {readings.length > 1 && (
+                {readings.length === 0 ? (
                   <GlassCard>
-                    <h2 className="text-white text-lg font-semibold mb-4">Ostatnie 7 dni</h2>
-                    <ResponsiveContainer width="100%" height={200}>
-                      <LineChart data={chartData.slice(-7)}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-                        <XAxis dataKey="date" stroke="rgba(255,255,255,0.30)" style={{ fontSize: "12px" }} />
-                        <YAxis stroke="rgba(255,255,255,0.30)" style={{ fontSize: "12px" }} />
-                        <Tooltip
-                          contentStyle={{
-                            background: "rgba(255, 255, 255, 0.06)",
-                            backdropFilter: "blur(24px)",
-                            border: "1px solid rgba(255, 255, 255, 0.10)",
-                            borderRadius: "12px",
-                            color: "#FFFFFF",
-                          }}
-                        />
-                        <Line
-                          type="monotone"
-                          dataKey="sys"
-                          stroke="#0A84FF"
-                          strokeWidth={2}
-                          dot={{ fill: "#0A84FF", strokeWidth: 2, stroke: "#FFFFFF", r: 4 }}
-                          style={{ filter: "drop-shadow(0 0 6px #0A84FF)" }}
-                        />
-                        <Line
-                          type="monotone"
-                          dataKey="dia"
-                          stroke="#FF9F0A"
-                          strokeWidth={2}
-                          dot={{ fill: "#FF9F0A", strokeWidth: 2, stroke: "#FFFFFF", r: 4 }}
-                        />
-                      </LineChart>
-                    </ResponsiveContainer>
+                    <div className="text-center py-8">
+                      <Heart className="w-16 h-16 mx-auto mb-4 text-white/30" />
+                      <h3 className="text-white text-xl font-semibold mb-2">Brak pomiarów</h3>
+                      <p className="text-white/55 mb-6">Dodaj swój pierwszy pomiar ciśnienia</p>
+                      <LiquidButton onClick={() => setCurrentTab("add")} variant="default" size="sm">
+                        Dodaj pomiar
+                      </LiquidButton>
+                    </div>
                   </GlassCard>
+                ) : (
+                  <>
+                    <GlassCard>
+                      <h2 className="text-white/55 text-sm font-medium mb-4">Ostatni pomiar</h2>
+                      <div className="flex items-center justify-center mb-4 tabular-nums">
+                        <span className="text-white font-bold" style={{ fontSize: "72px", letterSpacing: "-2px" }}>
+                          {formatValueOrDash(readings[0]?.systolic)}
+                        </span>
+                        <span className="text-white/55 font-bold text-5xl mx-2">/</span>
+                        <span className="text-white font-bold" style={{ fontSize: "72px", letterSpacing: "-2px" }}>
+                          {formatValueOrDash(readings[0]?.diastolic)}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-center gap-2 mb-4">
+                        <Heart className="w-5 h-5 text-white/55" />
+                        <span className="text-white text-2xl font-semibold tabular-nums">{formatValueOrDash(readings[0]?.pulse)}</span>
+                        <span className="text-white/55 text-lg">bpm</span>
+                      </div>
+                      {latestPulseCategory && (
+                        <p
+                          className="text-sm text-center mb-3"
+                          style={{ color: getPulseCategoryColor(latestPulseCategory) }}
+                        >
+                          {getPulseCategoryLabel(latestPulseCategory)}
+                        </p>
+                      )}
+
+                      <div className="flex justify-center mb-3">
+                        <CategoryBadge category={getPressureCategory(readings[0].systolic, readings[0].diastolic)} />
+                      </div>
+
+                      <p className="text-white/30 text-center text-sm">
+                        {formatTime(readings[0].timestamp)} • {formatDate(readings[0].timestamp)}
+                      </p>
+                    </GlassCard>
+
+                    {readings.length > 1 && (
+                      <GlassCard>
+                        <h2 className="text-white text-lg font-semibold mb-4">Ostatnie 7 dni</h2>
+                        <ResponsiveContainer width="100%" height={200}>
+                          <LineChart data={chartData.slice(-7)}>
+                            {pressureZones.map((zone) => (
+                              <ReferenceArea
+                                key={`dashboard-${zone.key}`}
+                                y1={zone.y1}
+                                y2={zone.y2}
+                                fill={zone.fill}
+                                ifOverflow="extendDomain"
+                              />
+                            ))}
+                            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                            <XAxis dataKey="date" stroke="rgba(255,255,255,0.30)" style={{ fontSize: "12px" }} />
+                            <YAxis stroke="rgba(255,255,255,0.30)" style={{ fontSize: "12px" }} domain={analyticsYDomain} />
+                            <Tooltip
+                              cursor={{ stroke: "rgba(255,255,255,0.26)", strokeDasharray: "4 4" }}
+                              content={<PressureTooltipCard />}
+                            />
+                            <Line
+                              type="monotone"
+                              dataKey="sys"
+                              stroke="#5AA8FF"
+                              strokeWidth={2}
+                              dot={{ fill: "#5AA8FF", strokeWidth: 2, stroke: "#FFFFFF", r: 4 }}
+                              activeDot={{ r: 6, strokeWidth: 2, stroke: "#FFFFFF", fill: "#5AA8FF" }}
+                              style={{ filter: "drop-shadow(0 0 6px #5AA8FF)" }}
+                            />
+                            <Line
+                              type="monotone"
+                              dataKey="dia"
+                              stroke="#FFB454"
+                              strokeWidth={2}
+                              dot={{ fill: "#FFB454", strokeWidth: 2, stroke: "#FFFFFF", r: 4 }}
+                              activeDot={{ r: 6, strokeWidth: 2, stroke: "#FFFFFF", fill: "#FFB454" }}
+                            />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      </GlassCard>
+                    )}
+                  </>
                 )}
               </>
             )}
@@ -1727,7 +2267,7 @@ const BloodPressureApp: React.FC = () => {
           <div className="p-6 space-y-6">
             <GlassCard>
               <h2 className="text-white text-2xl font-bold mb-6 text-center">Nowy pomiar</h2>
-              <div className="flex justify-center gap-3 mb-6">
+              <div className="flex justify-center gap-2 mb-6 w-full max-w-[320px] mx-auto">
                 <ScrollPicker value={systolic} onChange={setSystolic} min={60} max={250} label="SYS" />
                 <ScrollPicker value={diastolic} onChange={setDiastolic} min={40} max={150} label="DIA" />
                 <ScrollPicker value={pulse} onChange={setPulse} min={30} max={200} label="PULS" />
@@ -1764,9 +2304,25 @@ const BloodPressureApp: React.FC = () => {
         {currentTab === "history" && (
           <div className="p-6 space-y-4">
             <h1 className="text-white text-3xl font-bold mb-6 pt-4">Historia</h1>
-            {readings.length === 0 ? (
+            {isUserDataLoading ? (
+              <>
+                <SkeletonBar className="h-28 w-full" />
+                <SkeletonBar className="h-28 w-full" />
+                <SkeletonBar className="h-28 w-full" />
+              </>
+            ) : readings.length === 0 ? (
               <GlassCard>
-                <p className="text-white/55 text-center py-8">Brak pomiarów</p>
+                <div className="text-center py-8">
+                  <Clock className="w-12 h-12 mx-auto mb-4 text-white/30" />
+                  <p className="text-white/70 text-base font-medium">Brak pomiarów.</p>
+                  <button
+                    type="button"
+                    className="mt-3 text-[#7AB8FF] text-sm hover:text-[#A5CDFF] transition-colors"
+                    onClick={() => setCurrentTab("add")}
+                  >
+                    Dodaj pierwszy pomiar →
+                  </button>
+                </div>
               </GlassCard>
             ) : (
               readings.map((reading) => (
@@ -1775,14 +2331,14 @@ const BloodPressureApp: React.FC = () => {
                     <div className="flex-1">
                       <p className="text-white/55 text-sm mb-2">{formatTime(reading.timestamp)}</p>
                       <div className="flex items-center gap-2 mb-2">
-                        <span className="text-white text-3xl font-bold">
-                          {reading.systolic}/{reading.diastolic}
+                        <span className="text-white text-3xl font-bold tabular-nums">
+                          {formatValueOrDash(reading.systolic)}/{formatValueOrDash(reading.diastolic)}
                         </span>
                         <span
-                          className="text-lg whitespace-nowrap"
+                          className="text-lg whitespace-nowrap tabular-nums"
                           style={{ color: getPulseCategoryColor(getPulseCategory(reading.pulse)) }}
                         >
-                          • {reading.pulse} bpm
+                          • {formatValueOrDash(reading.pulse)} bpm
                         </span>
                       </div>
                       <p
@@ -1798,7 +2354,7 @@ const BloodPressureApp: React.FC = () => {
                     <div className="flex flex-col items-end gap-2">
                       <CategoryBadge category={getPressureCategory(reading.systolic, reading.diastolic)} />
                       <button
-                        onClick={() => handleDeleteReading(reading.id)}
+                        onClick={() => setPendingDeleteReadingId(reading.id)}
                         className="p-2 rounded-lg hover:bg-white/10 transition-colors"
                       >
                         <Trash2 className="w-5 h-5 text-white/55" />
@@ -1832,71 +2388,106 @@ const BloodPressureApp: React.FC = () => {
               ))}
             </div>
 
-            {stats && (
+            {isUserDataLoading ? (
+              <>
+                <SkeletonBar className="h-40 w-full" />
+                <SkeletonBar className="h-72 w-full" />
+              </>
+            ) : stats ? (
               <>
                 <div className="grid grid-cols-2 gap-4">
                   <GlassCard>
                     <p className="text-white/55 text-sm mb-2">Średnia SYS</p>
-                    <p className="text-white text-3xl font-bold">{stats.avgSys}</p>
+                    <p className="text-white text-3xl font-bold tabular-nums">{formatValueOrDash(stats.avgSys)}</p>
                   </GlassCard>
                   <GlassCard>
                     <p className="text-white/55 text-sm mb-2">Średnia DIA</p>
-                    <p className="text-white text-3xl font-bold">{stats.avgDia}</p>
+                    <p className="text-white text-3xl font-bold tabular-nums">{formatValueOrDash(stats.avgDia)}</p>
                   </GlassCard>
                   <GlassCard>
                     <p className="text-white/55 text-sm mb-2">Średni puls</p>
-                    <p className="text-white text-3xl font-bold">{stats.avgPulse}</p>
+                    <p className="text-white text-3xl font-bold tabular-nums">{formatValueOrDash(stats.avgPulse)}</p>
                   </GlassCard>
                   <GlassCard>
                     <p className="text-white/55 text-sm mb-2">% w normie</p>
-                    <p className="text-white text-3xl font-bold">{stats.normalPercent}%</p>
+                    <p className="text-white text-3xl font-bold tabular-nums">{formatPercentOrDash(stats.normalPercent)}</p>
                   </GlassCard>
                 </div>
 
                 <GlassCard>
                   <h3 className="text-white text-lg font-semibold mb-4">Wykres ciśnienia</h3>
-                  <ResponsiveContainer width="100%" height={250}>
-                    <LineChart data={chartData}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-                      <XAxis dataKey="date" stroke="rgba(255,255,255,0.30)" style={{ fontSize: "11px" }} />
-                      <YAxis stroke="rgba(255,255,255,0.30)" style={{ fontSize: "12px" }} />
-                      <Tooltip
-                        contentStyle={{
-                          background: "rgba(255, 255, 255, 0.06)",
-                          backdropFilter: "blur(24px)",
-                          border: "1px solid rgba(255, 255, 255, 0.10)",
-                          borderRadius: "12px",
-                          color: "#FFFFFF",
-                        }}
-                      />
-                      <ReferenceLine y={120} stroke="rgba(255,255,255,0.20)" strokeDasharray="3 3" />
-                      <ReferenceLine y={80} stroke="rgba(255,255,255,0.20)" strokeDasharray="3 3" />
-                      <Line
-                        type="monotone"
-                        dataKey="sys"
-                        stroke="#0A84FF"
-                        strokeWidth={2}
-                        dot={{ fill: "#0A84FF", strokeWidth: 2, stroke: "#FFFFFF", r: 4 }}
-                        style={{ filter: "drop-shadow(0 0 6px #0A84FF)" }}
-                      />
-                      <Line
-                        type="monotone"
-                        dataKey="dia"
-                        stroke="#FF9F0A"
-                        strokeWidth={2}
-                        dot={{ fill: "#FF9F0A", strokeWidth: 2, stroke: "#FFFFFF", r: 4 }}
-                      />
-                    </LineChart>
-                  </ResponsiveContainer>
+                  {filteredReadings.length <= 1 ? (
+                    <p className="text-white/65 text-sm">Dodaj więcej pomiarów aby zobaczyć trend.</p>
+                  ) : (
+                    <ResponsiveContainer width="100%" height={250}>
+                      <LineChart data={chartData}>
+                        {pressureZones.map((zone) => (
+                          <ReferenceArea
+                            key={zone.key}
+                            y1={zone.y1}
+                            y2={zone.y2}
+                            fill={zone.fill}
+                            ifOverflow="extendDomain"
+                          />
+                        ))}
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                        <XAxis dataKey="date" stroke="rgba(255,255,255,0.30)" style={{ fontSize: "11px" }} />
+                        <YAxis
+                          stroke="rgba(255,255,255,0.30)"
+                          style={{ fontSize: "12px" }}
+                          domain={analyticsYDomain}
+                        />
+                        <Tooltip
+                          cursor={{ stroke: "rgba(255,255,255,0.26)", strokeDasharray: "4 4" }}
+                          content={<PressureTooltipCard />}
+                        />
+                        <ReferenceLine
+                          y={stats.avgSys}
+                          stroke="rgba(122,184,255,0.92)"
+                          strokeDasharray="6 6"
+                          ifOverflow="extendDomain"
+                        />
+                        <ReferenceLine
+                          y={stats.avgDia}
+                          stroke="rgba(255,180,84,0.92)"
+                          strokeDasharray="6 6"
+                          ifOverflow="extendDomain"
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="sys"
+                          name="SYS"
+                          stroke="#5AA8FF"
+                          strokeWidth={3}
+                          dot={{ fill: "#5AA8FF", strokeWidth: 2, stroke: "#FFFFFF", r: 4 }}
+                          activeDot={{ r: 6, strokeWidth: 2, stroke: "#FFFFFF", fill: "#5AA8FF" }}
+                          style={{ filter: "drop-shadow(0 0 8px rgba(90,168,255,0.85))" }}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="dia"
+                          name="DIA"
+                          stroke="#FFB454"
+                          strokeWidth={3}
+                          dot={{ fill: "#FFB454", strokeWidth: 2, stroke: "#FFFFFF", r: 4 }}
+                          activeDot={{ r: 6, strokeWidth: 2, stroke: "#FFFFFF", fill: "#FFB454" }}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  )}
                 </GlassCard>
 
               </>
+            ) : (
+              <GlassCard>
+                <p className="text-white/65">Brak danych do analizy.</p>
+              </GlassCard>
             )}
           </div>
         )}
 
         <div
-          className="fixed bottom-0 left-0 right-0"
+          className="fixed bottom-0 left-0 right-0 z-40"
           style={{
             maxWidth: "430px",
             margin: "0 auto",
