@@ -49,7 +49,7 @@ type AppTab = "dashboard" | "add" | "history" | "analytics";
 type PressureCategory = "normal" | "elevated" | "high1" | "high2" | "low";
 type PulseCategory = "low" | "normal" | "high";
 type TimeRange = "7d" | "30d" | "3m" | "all";
-type SettingsSectionKey = "pulse";
+type SettingsSectionKey = "pulse" | "pressure";
 type AuthView = "login" | "signup";
 type PasswordResetStep = "idle" | "request" | "verify";
 
@@ -158,18 +158,19 @@ const normalizeMeasurementPreferences = (candidate: MeasurementPreferences): Mea
   };
 };
 
-const classifyPressure = (sys: number, dia: number): PressureCategory => {
-  if (sys >= PRESSURE_RULES.high2SysMin || dia >= PRESSURE_RULES.high2DiaMin) return "high2";
-  if (
-    (sys >= PRESSURE_RULES.high1SysMin && sys <= PRESSURE_RULES.high1SysMax) ||
-    (dia >= PRESSURE_RULES.high1DiaMin && dia <= PRESSURE_RULES.high1DiaMax)
-  ) {
+const classifyPressure = (
+  sys: number,
+  dia: number,
+  pressurePrefs: PressurePreferences = defaultMeasurementPreferences.pressure,
+): PressureCategory => {
+  const { lowSys, lowDia, elevatedSys, high1Sys, high1Dia, high2Sys, high2Dia } = pressurePrefs;
+
+  if (sys >= high2Sys || dia >= high2Dia) return "high2";
+  if ((sys >= high1Sys && sys < high2Sys) || (dia >= high1Dia && dia < high2Dia)) {
     return "high1";
   }
-  if (sys < PRESSURE_RULES.lowSys || dia < PRESSURE_RULES.lowDia) return "low";
-  if (sys <= PRESSURE_RULES.normalSysMax && dia <= PRESSURE_RULES.normalDiaMax) {
-    return "normal";
-  }
+  if (sys < lowSys || dia < lowDia) return "low";
+  if (sys < elevatedSys && dia < high1Dia) return "normal";
   return "elevated";
 };
 
@@ -728,7 +729,11 @@ const AuthScreen: React.FC<{
       } else {
         setAwaitsEmailVerification(true);
         resetPasswordResetState();
-        setSuccess("Wysłaliśmy kod potwierdzający na Twój email.");
+        setSuccess(
+          view === "signup"
+            ? "Wysłaliśmy kod potwierdzający na Twój email."
+            : "Hasło poprawne. Wysłaliśmy kod potwierdzający na Twój email.",
+        );
       }
     } catch (err) {
       const rawError = extractErrorMessage(err, "Wystąpił błąd logowania.");
@@ -1242,6 +1247,32 @@ const AuthScreen: React.FC<{
 
 // Main UI Components
 
+let sharedPickerAudioContext: AudioContext | null = null;
+
+const getSharedPickerAudioContext = (): AudioContext | null => {
+  if (typeof window === "undefined") return null;
+  const WebAudioContext =
+    window.AudioContext ||
+    (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!WebAudioContext) return null;
+
+  if (!sharedPickerAudioContext) {
+    sharedPickerAudioContext = new WebAudioContext();
+  }
+
+  return sharedPickerAudioContext;
+};
+
+const unlockSharedPickerAudio = () => {
+  const ctx = getSharedPickerAudioContext();
+  if (!ctx) return;
+  if (ctx.state === "suspended") {
+    void ctx.resume().catch(() => {
+      // Ignorujemy ograniczenia autoodtwarzania - dźwięk jest opcjonalny.
+    });
+  }
+};
+
 const ScrollPicker: React.FC<{
   value: number;
   onChange: (value: number) => void;
@@ -1250,7 +1281,6 @@ const ScrollPicker: React.FC<{
   label: string;
 }> = ({ value, onChange, min, max, label }) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
   const lastPlayedValueRef = useRef<number | null>(null);
   const lastPlayAtRef = useRef(0);
   const hasUserInteractedRef = useRef(false);
@@ -1270,21 +1300,19 @@ const ScrollPicker: React.FC<{
 
     const now = performance.now();
     if (now - lastPlayAtRef.current < 40) return;
-
-    const WebAudioContext =
-      typeof window !== "undefined"
-        ? window.AudioContext || (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
-        : undefined;
-    if (!WebAudioContext) return;
+    const ctx = getSharedPickerAudioContext();
+    if (!ctx) return;
+    if (ctx.state !== "running") {
+      void ctx
+        .resume()
+        .then(() => playSelectionSound(nextValue))
+        .catch(() => {
+          // Brak dźwięku nie blokuje działania scroll pickera.
+        });
+      return;
+    }
 
     try {
-      const ctx = audioContextRef.current ?? new WebAudioContext();
-      audioContextRef.current = ctx;
-
-      if (ctx.state === "suspended") {
-        void ctx.resume();
-      }
-
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       const normalizedRange = Math.max(1, max - min);
@@ -1357,10 +1385,6 @@ const ScrollPicker: React.FC<{
       if (inertiaRafRef.current !== null) {
         window.cancelAnimationFrame(inertiaRafRef.current);
       }
-      if (audioContextRef.current) {
-        void audioContextRef.current.close();
-        audioContextRef.current = null;
-      }
     };
   }, []);
 
@@ -1426,6 +1450,7 @@ const ScrollPicker: React.FC<{
     hasUserInteractedRef.current = true;
     isInteractingRef.current = true;
     shouldSnapAfterReleaseRef.current = false;
+    unlockSharedPickerAudio();
     if (containerRef.current) {
       // Przerywa ewentualny trwający smooth snap, żeby od razu oddać kontrolę palcu.
       containerRef.current.scrollTo({ top: containerRef.current.scrollTop, behavior: "auto" });
@@ -1446,6 +1471,7 @@ const ScrollPicker: React.FC<{
   const handleWheel = () => {
     hasUserInteractedRef.current = true;
     shouldSnapAfterReleaseRef.current = true;
+    unlockSharedPickerAudio();
     startInertiaWatcher();
   };
 
@@ -1475,20 +1501,23 @@ const ScrollPicker: React.FC<{
           {values.map((val) => (
             <div
               key={val}
-              className="flex items-center justify-center transition-all duration-300 ease-out"
+              className="flex items-center justify-center transition-[opacity,transform,color] duration-120 ease-out"
               style={{
                 height: itemHeight,
-                fontSize:
-                  val === internalValue
-                    ? "52px"
-                    : val >= internalValue - 1 && val <= internalValue + 1
-                      ? "30px"
-                      : "20px",
+                fontSize: "36px",
                 opacity: val === internalValue ? 1 : val >= internalValue - 1 && val <= internalValue + 1 ? 0.55 : 0.2,
                 fontWeight: val === internalValue ? 650 : 420,
                 lineHeight: 0.95,
                 letterSpacing: "0em",
+                transform:
+                  val === internalValue
+                    ? "scale(1)"
+                    : val >= internalValue - 1 && val <= internalValue + 1
+                      ? "scale(0.86)"
+                      : "scale(0.7)",
                 color: "#FFFFFF",
+                fontVariantNumeric: "tabular-nums lining-nums",
+                textRendering: "optimizeLegibility",
               }}
             >
               {val}
@@ -1530,11 +1559,12 @@ const PressureTooltipCard: React.FC<{
   active?: boolean;
   payload?: Array<{ payload?: { sys: number; dia: number; pulse: number } }>;
   label?: string | number;
-}> = ({ active, payload, label }) => {
+  pressurePrefs?: PressurePreferences;
+}> = ({ active, payload, label, pressurePrefs = defaultMeasurementPreferences.pressure }) => {
   const point = payload?.[0]?.payload;
   if (!active || !point) return null;
 
-  const category = classifyPressure(point.sys, point.dia);
+  const category = classifyPressure(point.sys, point.dia, pressurePrefs);
   const categoryStyles = getCategoryStyles(category);
 
   return (
@@ -1863,6 +1893,7 @@ const BloodPressureApp: React.FC = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [settingsSections, setSettingsSections] = useState<Record<SettingsSectionKey, boolean>>({
     pulse: false,
+    pressure: false,
   });
   const [preferences, setPreferences] = useState<MeasurementPreferences>(defaultMeasurementPreferences);
   const [draftPreferences, setDraftPreferences] = useState<MeasurementPreferences>(preferences);
@@ -1876,6 +1907,10 @@ const BloodPressureApp: React.FC = () => {
   const [showDeleteAccountModal, setShowDeleteAccountModal] = useState(false);
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
   const [deleteAccountConfirmText, setDeleteAccountConfirmText] = useState("");
+  const [isCoarsePointer, setIsCoarsePointer] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.matchMedia("(pointer: coarse)").matches;
+  });
 
   // Convex mutations
   const addReadingMutation = useMutation(api.readings.add);
@@ -1913,9 +1948,25 @@ const BloodPressureApp: React.FC = () => {
       setDraftPreferences(preferences);
       setSettingsSections({
         pulse: false,
+        pressure: false,
       });
     }
   }, [showSettings, preferences]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const media = window.matchMedia("(pointer: coarse)");
+    const update = () => setIsCoarsePointer(media.matches);
+    update();
+
+    if (typeof media.addEventListener === "function") {
+      media.addEventListener("change", update);
+      return () => media.removeEventListener("change", update);
+    }
+
+    media.addListener(update);
+    return () => media.removeListener(update);
+  }, []);
 
   const numberFromInput = (valueAsNumber: number, fallback: number) =>
     Number.isFinite(valueAsNumber) ? valueAsNumber : fallback;
@@ -1925,6 +1976,16 @@ const BloodPressureApp: React.FC = () => {
       ...prev,
       pulse: {
         ...prev.pulse,
+        [key]: value,
+      },
+    }));
+  };
+
+  const updatePressureDraft = <K extends keyof PressurePreferences>(key: K, value: number) => {
+    setDraftPreferences((prev) => ({
+      ...prev,
+      pressure: {
+        ...prev.pressure,
         [key]: value,
       },
     }));
@@ -1986,7 +2047,7 @@ const BloodPressureApp: React.FC = () => {
       readings: readings.map((reading) => ({
         ...reading,
         timestamp: reading.timestamp.toISOString(),
-        pressureCategory: classifyPressure(reading.systolic, reading.diastolic),
+        pressureCategory: classifyPressure(reading.systolic, reading.diastolic, preferences.pressure),
         pulseCategory: classifyPulse(reading.pulse, preferences.pulse),
       })),
     };
@@ -2004,7 +2065,7 @@ const BloodPressureApp: React.FC = () => {
     URL.revokeObjectURL(url);
   };
 
-  const getPressureCategory = (sys: number, dia: number) => classifyPressure(sys, dia);
+  const getPressureCategory = (sys: number, dia: number) => classifyPressure(sys, dia, preferences.pressure);
   const getPulseCategory = (pulseValue: number) => classifyPulse(pulseValue, preferences.pulse);
 
   const handleAddReading = async () => {
@@ -2212,18 +2273,21 @@ const BloodPressureApp: React.FC = () => {
     const avgDia = Math.round(filteredReadings.reduce((sum, reading) => sum + reading.diastolic, 0) / filteredReadings.length);
     const avgPulse = Math.round(filteredReadings.reduce((sum, reading) => sum + reading.pulse, 0) / filteredReadings.length);
     const normalCount = filteredReadings.filter(
-      (reading) => classifyPressure(reading.systolic, reading.diastolic) === "normal"
+      (reading) => classifyPressure(reading.systolic, reading.diastolic, preferences.pressure) === "normal"
     ).length;
     const normalPercent = Math.round((normalCount / filteredReadings.length) * 100);
 
     return { avgSys, avgDia, avgPulse, normalPercent };
-  }, [filteredReadings]);
+  }, [filteredReadings, preferences.pressure]);
 
   const analyticsYDomain: [number, number] = [PRESSURE_RULES.chartMin, PRESSURE_RULES.chartMax];
   const pressureZones: Array<{ key: string; y1: number; y2: number; fill: string }> = [
-    { key: "normal", y1: PRESSURE_RULES.lowDia, y2: PRESSURE_RULES.normalSysMax, fill: "rgba(48, 209, 88, 0.08)" },
-    { key: "high2", y1: PRESSURE_RULES.high2SysMin, y2: PRESSURE_RULES.chartMax, fill: "rgba(255, 69, 58, 0.10)" },
+    { key: "normal", y1: preferences.pressure.lowDia, y2: preferences.pressure.elevatedSys - 1, fill: "rgba(48, 209, 88, 0.08)" },
+    { key: "high2", y1: preferences.pressure.high2Sys, y2: PRESSURE_RULES.chartMax, fill: "rgba(255, 69, 58, 0.10)" },
   ];
+  const chartTooltipTrigger = isCoarsePointer ? "click" : "hover";
+  const chartDotRadius = isCoarsePointer ? 5 : 4;
+  const chartActiveDotRadius = isCoarsePointer ? 8 : 6;
 
   const latestPulseCategory =
     readings.length > 0 ? getPulseCategory(readings[0].pulse) : null;
@@ -2321,6 +2385,79 @@ const BloodPressureApp: React.FC = () => {
                     <p className="text-white text-sm font-semibold mb-1">{userData?.name}</p>
                     <p className="text-white/50 text-xs">{userData?.email}</p>
                   </div>
+
+                  <SettingsSection
+                    title="Progi ciśnienia"
+                    description="Wpływa na klasyfikację odczytów i analizę"
+                    isOpen={settingsSections.pressure}
+                    onToggle={() => toggleSettingsSection("pressure")}
+                  >
+                    <div className="grid grid-cols-2 gap-3">
+                      <SettingsField
+                        label="Niskie SYS (<)"
+                        value={draftPreferences.pressure.lowSys}
+                        onChange={(next) =>
+                          updatePressureDraft("lowSys", numberFromInput(next, draftPreferences.pressure.lowSys))
+                        }
+                      />
+                      <SettingsField
+                        label="Niskie DIA (<)"
+                        value={draftPreferences.pressure.lowDia}
+                        onChange={(next) =>
+                          updatePressureDraft("lowDia", numberFromInput(next, draftPreferences.pressure.lowDia))
+                        }
+                      />
+                      <SettingsField
+                        label="Norma SYS do (<)"
+                        value={draftPreferences.pressure.elevatedSys}
+                        onChange={(next) =>
+                          updatePressureDraft("elevatedSys", numberFromInput(next, draftPreferences.pressure.elevatedSys))
+                        }
+                      />
+                      <SettingsField
+                        label="Nadciśnienie I SYS od (>=)"
+                        value={draftPreferences.pressure.high1Sys}
+                        onChange={(next) =>
+                          updatePressureDraft("high1Sys", numberFromInput(next, draftPreferences.pressure.high1Sys))
+                        }
+                      />
+                      <SettingsField
+                        label="Nadciśnienie I DIA od (>=)"
+                        value={draftPreferences.pressure.high1Dia}
+                        onChange={(next) =>
+                          updatePressureDraft("high1Dia", numberFromInput(next, draftPreferences.pressure.high1Dia))
+                        }
+                      />
+                      <SettingsField
+                        label="Nadciśnienie II SYS od (>=)"
+                        value={draftPreferences.pressure.high2Sys}
+                        onChange={(next) =>
+                          updatePressureDraft("high2Sys", numberFromInput(next, draftPreferences.pressure.high2Sys))
+                        }
+                      />
+                      <SettingsField
+                        label="Nadciśnienie II DIA od (>=)"
+                        value={draftPreferences.pressure.high2Dia}
+                        onChange={(next) =>
+                          updatePressureDraft("high2Dia", numberFromInput(next, draftPreferences.pressure.high2Dia))
+                        }
+                      />
+                      <SettingsField
+                        label="Kryzys SYS od (>=)"
+                        value={draftPreferences.pressure.high3Sys}
+                        onChange={(next) =>
+                          updatePressureDraft("high3Sys", numberFromInput(next, draftPreferences.pressure.high3Sys))
+                        }
+                      />
+                      <SettingsField
+                        label="Kryzys DIA od (>=)"
+                        value={draftPreferences.pressure.high3Dia}
+                        onChange={(next) =>
+                          updatePressureDraft("high3Dia", numberFromInput(next, draftPreferences.pressure.high3Dia))
+                        }
+                      />
+                    </div>
+                  </SettingsSection>
 
                   <SettingsSection
                     title="Zakres pulsu"
@@ -2602,48 +2739,6 @@ const BloodPressureApp: React.FC = () => {
                       </p>
                     </GlassCard>
 
-                    {readings.length > 1 && (
-                      <GlassCard>
-                        <h2 className="text-white text-lg font-semibold mb-4">Ostatnie 7 dni</h2>
-                        <ResponsiveContainer width="100%" height={200}>
-                          <LineChart data={chartData.slice(-7)}>
-                            {pressureZones.map((zone) => (
-                              <ReferenceArea
-                                key={`dashboard-${zone.key}`}
-                                y1={zone.y1}
-                                y2={zone.y2}
-                                fill={zone.fill}
-                                ifOverflow="extendDomain"
-                              />
-                            ))}
-                            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-                            <XAxis dataKey="date" stroke="rgba(255,255,255,0.30)" style={{ fontSize: "12px" }} />
-                            <YAxis stroke="rgba(255,255,255,0.30)" style={{ fontSize: "12px" }} domain={analyticsYDomain} />
-                            <Tooltip
-                              cursor={{ stroke: "rgba(255,255,255,0.26)", strokeDasharray: "4 4" }}
-                              content={<PressureTooltipCard />}
-                            />
-                            <Line
-                              type="monotone"
-                              dataKey="sys"
-                              stroke="#5AA8FF"
-                              strokeWidth={2}
-                              dot={{ fill: "#5AA8FF", strokeWidth: 2, stroke: "#FFFFFF", r: 4 }}
-                              activeDot={{ r: 6, strokeWidth: 2, stroke: "#FFFFFF", fill: "#5AA8FF" }}
-                              style={{ filter: "drop-shadow(0 0 6px #5AA8FF)" }}
-                            />
-                            <Line
-                              type="monotone"
-                              dataKey="dia"
-                              stroke="#FFB454"
-                              strokeWidth={2}
-                              dot={{ fill: "#FFB454", strokeWidth: 2, stroke: "#FFFFFF", r: 4 }}
-                              activeDot={{ r: 6, strokeWidth: 2, stroke: "#FFFFFF", fill: "#FFB454" }}
-                            />
-                          </LineChart>
-                        </ResponsiveContainer>
-                      </GlassCard>
-                    )}
                   </>
                 )}
               </>
@@ -2826,8 +2921,10 @@ const BloodPressureApp: React.FC = () => {
                           domain={analyticsYDomain}
                         />
                         <Tooltip
+                          trigger={chartTooltipTrigger}
+                          shared
                           cursor={{ stroke: "rgba(255,255,255,0.26)", strokeDasharray: "4 4" }}
-                          content={<PressureTooltipCard />}
+                          content={<PressureTooltipCard pressurePrefs={preferences.pressure} />}
                         />
                         <ReferenceLine
                           y={stats.avgSys}
@@ -2847,8 +2944,8 @@ const BloodPressureApp: React.FC = () => {
                           name="SYS"
                           stroke="#5AA8FF"
                           strokeWidth={3}
-                          dot={{ fill: "#5AA8FF", strokeWidth: 2, stroke: "#FFFFFF", r: 4 }}
-                          activeDot={{ r: 6, strokeWidth: 2, stroke: "#FFFFFF", fill: "#5AA8FF" }}
+                          dot={{ fill: "#5AA8FF", strokeWidth: 2, stroke: "#FFFFFF", r: chartDotRadius }}
+                          activeDot={{ r: chartActiveDotRadius, strokeWidth: 2, stroke: "#FFFFFF", fill: "#5AA8FF" }}
                           style={{ filter: "drop-shadow(0 0 8px rgba(90,168,255,0.85))" }}
                         />
                         <Line
@@ -2857,8 +2954,8 @@ const BloodPressureApp: React.FC = () => {
                           name="DIA"
                           stroke="#FFB454"
                           strokeWidth={3}
-                          dot={{ fill: "#FFB454", strokeWidth: 2, stroke: "#FFFFFF", r: 4 }}
-                          activeDot={{ r: 6, strokeWidth: 2, stroke: "#FFFFFF", fill: "#FFB454" }}
+                          dot={{ fill: "#FFB454", strokeWidth: 2, stroke: "#FFFFFF", r: chartDotRadius }}
+                          activeDot={{ r: chartActiveDotRadius, strokeWidth: 2, stroke: "#FFFFFF", fill: "#FFB454" }}
                         />
                       </LineChart>
                     </ResponsiveContainer>
