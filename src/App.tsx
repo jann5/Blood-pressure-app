@@ -31,6 +31,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { jsPDF } from "jspdf";
 
 import { BackgroundPaths } from "@/components/ui/background-paths";
 import { Input } from "@/components/ui/input";
@@ -73,6 +74,12 @@ interface BloodPressureReading {
   secondArm?: SecondArmReading;
   timestamp: Date;
   note?: string;
+}
+
+interface DisplayReadingValues {
+  systolic: number;
+  diastolic: number;
+  pulse: number;
 }
 
 interface PressurePreferences {
@@ -129,6 +136,9 @@ const PRESSURE_RULES = {
   chartMin: 40,
   chartMax: 200,
 } as const;
+
+const OTP_CODE_VALIDITY_SECONDS = 10 * 60;
+const OTP_RESEND_COOLDOWN_SECONDS = 30;
 
 const clamp = (value: unknown, min: number, max: number, fallback: number) => {
   const parsed = typeof value === "number" ? value : Number(value);
@@ -258,6 +268,13 @@ const formatPercentOrDash = (value: unknown): string => {
   return parsed === null ? "--" : `${Math.round(parsed)}%`;
 };
 
+const formatPreciseValueOrDash = (value: unknown, digits = 1): string => {
+  const parsed = toFiniteNumber(value);
+  if (parsed === null) return "--";
+  if (Number.isInteger(parsed)) return String(parsed);
+  return parsed.toFixed(digits);
+};
+
 const formatDaysLabel = (days: number): string => {
   if (days === 1) return "1 dzień";
   return `${days} dni`;
@@ -370,6 +387,47 @@ const getRangeStart = (range: TimeRange, now: Date): Date | null => {
   return addDays(todayStart, -89);
 };
 
+const getDisplayReadingValues = (reading: BloodPressureReading): DisplayReadingValues => {
+  if (!reading.secondArm) {
+    return {
+      systolic: reading.systolic,
+      diastolic: reading.diastolic,
+      pulse: reading.pulse,
+    };
+  }
+
+  return {
+    systolic: Math.round((reading.systolic + reading.secondArm.systolic) / 2),
+    diastolic: Math.round((reading.diastolic + reading.secondArm.diastolic) / 2),
+    pulse: Math.round((reading.pulse + reading.secondArm.pulse) / 2),
+  };
+};
+
+const averageRounded = (values: number[]): number | null => {
+  if (values.length === 0) return null;
+  const total = values.reduce((sum, value) => sum + value, 0);
+  return Math.round(total / values.length);
+};
+
+const standardDeviation = (values: number[]): number | null => {
+  if (values.length === 0) return null;
+  if (values.length === 1) return 0;
+
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
+  return Number(Math.sqrt(variance).toFixed(1));
+};
+
+const formatSecondsToClock = (totalSeconds: number): string => {
+  const safe = Math.max(0, Math.floor(totalSeconds));
+  const minutes = Math.floor(safe / 60);
+  const seconds = safe % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+};
+
+const toPdfSafeText = (value: string): string =>
+  value.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
 const getDayStamp = (date: Date): number => startOfLocalDay(date).getTime();
 
 const calculateStreak = (readings: BloodPressureReading[]) => {
@@ -458,20 +516,28 @@ const getStreakGraphic = (current: number, hasTodayEntry: boolean): { src: strin
 const getWelcomeLine = (name: string, loginCount: number) => {
   const firstName = name.trim().split(" ")[0] || "Użytkowniku";
   const variantsReturning = [
-    `${firstName}, dobrze Cię znów widzieć`,
-    `${firstName} wraca — świetnie`,
-    `${firstName}, lecimy dalej z pomiarami`,
+    `Witaj, ${firstName}`,
+    `Dobrze Cię widzieć, ${firstName}`,
+    `${firstName}, czas na kolejny pomiar`,
+    `${firstName}, działamy dalej`,
+    `${firstName}, wszystko gotowe`,
+    `${firstName}, wracasz w dobrym rytmie`,
+    `${firstName}, dobra robota z regularnością`,
+    `${firstName}, jedziemy dalej`,
+    `${firstName}, witaj ponownie`,
+    `${firstName}, kolejny krok dla zdrowia`,
   ];
   const variantsNew = [
     `Witaj, ${firstName}`,
-    `Cześć ${firstName}, miło Cię poznać`,
-    `${firstName}, zaczynamy Twoją historię pomiarów`,
+    `Cześć ${firstName}`,
+    `${firstName}, zaczynamy Twoją historię`,
+    `Miło Cię widzieć, ${firstName}`,
+    `${firstName}, startujemy`,
   ];
 
-  if (loginCount > 1) {
-    return variantsReturning[loginCount % variantsReturning.length];
-  }
-  return variantsNew[Math.max(0, loginCount - 1) % variantsNew.length];
+  const variants = loginCount > 1 ? variantsReturning : variantsNew;
+  const randomIndex = Math.floor(Math.random() * variants.length);
+  return variants[randomIndex];
 };
 
 const toDateInput = (date: Date): string => {
@@ -606,15 +672,121 @@ const AuthScreen: React.FC<{
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [success, setSuccess] = useState<string | null>(null);
+  const [verificationExpiresAtMs, setVerificationExpiresAtMs] = useState<number | null>(null);
+  const [verificationResendReadyAtMs, setVerificationResendReadyAtMs] = useState<number | null>(null);
+  const [resetCodeExpiresAtMs, setResetCodeExpiresAtMs] = useState<number | null>(null);
+  const [resetCodeResendReadyAtMs, setResetCodeResendReadyAtMs] = useState<number | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const authRequestInFlightRef = useRef(false);
 
   const normalizeEmail = (rawEmail: string) => rawEmail.trim().toLowerCase();
   const normalizeVerificationCode = (rawCode: string) => rawCode.replace(/\D/g, "").slice(0, 6);
   const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   const isPasswordResetFlow = passwordResetStep !== "idle";
+  const verificationSecondsLeft =
+    verificationExpiresAtMs === null ? null : Math.max(0, Math.ceil((verificationExpiresAtMs - nowMs) / 1000));
+  const verificationResendSecondsLeft =
+    verificationResendReadyAtMs === null ? 0 : Math.max(0, Math.ceil((verificationResendReadyAtMs - nowMs) / 1000));
+  const resetCodeSecondsLeft =
+    resetCodeExpiresAtMs === null ? null : Math.max(0, Math.ceil((resetCodeExpiresAtMs - nowMs) / 1000));
+  const resetResendSecondsLeft =
+    resetCodeResendReadyAtMs === null ? 0 : Math.max(0, Math.ceil((resetCodeResendReadyAtMs - nowMs) / 1000));
+  const canResendVerificationCode = verificationResendSecondsLeft === 0 && !isLoading;
+  const canResendResetCode = resetResendSecondsLeft === 0 && !isLoading;
 
-  const mapAuthError = (message: string) => {
+  useEffect(() => {
+    if (!awaitsEmailVerification && passwordResetStep !== "verify") {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [awaitsEmailVerification, passwordResetStep]);
+
+  const mapAuthError = (message: string, fallback: string) => {
     const lower = message.toLowerCase();
+    const normalized = lower.replace(/\s+/g, " ");
+
+    if (
+      normalized.includes("invalidsecret") ||
+      normalized.includes("invalid secret") ||
+      normalized.includes("incorrect password") ||
+      normalized.includes("invalid password")
+    ) {
+      return "Błędne hasło.";
+    }
+    if (
+      normalized.includes("invalidaccountid") ||
+      normalized.includes("invalid account id") ||
+      normalized.includes("nie znaleziono konta") ||
+      normalized.includes("no account")
+    ) {
+      return "Nie znaleziono konta z tym adresem e-mail.";
+    }
+    if (normalized.includes("toomanyfailedattempts")) {
+      return "Za dużo nieudanych prób. Spróbuj ponownie za chwilę.";
+    }
+    if (
+      normalized.includes("invalid code") ||
+      normalized.includes("could not verify code") ||
+      normalized.includes("invalid verification") ||
+      (normalized.includes("kod") && normalized.includes("wygas"))
+    ) {
+      return "Kod jest nieprawidłowy albo wygasł.";
+    }
+    if (normalized.includes("password reset is not enabled")) {
+      return "Reset hasła jest chwilowo niedostępny.";
+    }
+    if (normalized.includes("missing `newpassword`")) {
+      return "Podaj nowe hasło.";
+    }
+    if (normalized.includes("missing `password`")) {
+      return "Podaj hasło.";
+    }
+    if (normalized.includes("hasła nie są takie same") || normalized.includes("nowe hasła nie są takie same")) {
+      return "Hasła nie są takie same.";
+    }
+    if (normalized.includes("co najmniej 8 znaków")) {
+      return "Hasło musi mieć co najmniej 8 znaków.";
+    }
+    if (normalized.includes("podaj 6-cyfrowy kod")) {
+      return "Podaj 6-cyfrowy kod.";
+    }
+    if (normalized.includes("podaj kod potwierdzający")) {
+      return "Podaj 6-cyfrowy kod potwierdzający.";
+    }
+    if (normalized.includes("choose whether you are left") || normalized.includes("wybierz czy jesteś lewo")) {
+      return "Wybierz, czy jesteś lewo- czy praworęczny/a.";
+    }
+    if (
+      normalized.includes("already exists") ||
+      normalized.includes("already registered") ||
+      (normalized.includes("account") && normalized.includes("exists"))
+    ) {
+      return "Konto z tym e-mailem już istnieje. Zaloguj się.";
+    }
+    if (
+      normalized.includes("verify a domain at resend.com/domains") ||
+      normalized.includes("resend nie jest gotowy produkcyjnie")
+    ) {
+      return "Konfiguracja e-mail jest niekompletna. Zweryfikuj domenę nadawcy.";
+    }
+    if (
+      normalized.includes("smtp_send_failed") ||
+      normalized.includes("incorrect authentication data") ||
+      normalized.includes("invalid login: 535")
+    ) {
+      return "Błąd SMTP. Sprawdź login i hasło skrzynki nadawczej.";
+    }
+    if (normalized.includes("invalid email") || normalized.includes("podaj poprawny adres")) {
+      return "Podaj poprawny adres e-mail.";
+    }
+    if (normalized.includes("failed to fetch") || normalized.includes("network")) {
+      return "Brak połączenia z serwerem. Sprawdź internet.";
+    }
     if (lower.includes("invalid credentials")) {
       return "Nieprawidłowy email lub hasło.";
     }
@@ -627,27 +799,8 @@ const AuthScreen: React.FC<{
     if (lower.includes("toomanyfailedattempts")) {
       return "Za dużo nieudanych prób logowania. Spróbuj ponownie za chwilę.";
     }
-    if (lower.includes("password reset is not enabled")) {
-      return "Odzyskiwanie hasła jest chwilowo niedostępne.";
-    }
-    if (lower.includes("wybierz czy jesteś lewo") || lower.includes("choose whether you are left")) {
-      return "Wybierz czy jesteś lewo- czy praworęczny.";
-    }
-    if (lower.includes("invalid email") || lower.includes("podaj poprawny adres")) {
-      return "Podaj poprawny adres e-mail.";
-    }
-    if (lower.includes("invalid password") || lower.includes("incorrect password")) {
-      return "Nieprawidłowe hasło.";
-    }
-    if (
-      lower.includes("already exists") ||
-      lower.includes("already registered") ||
-      (lower.includes("account") && lower.includes("exists"))
-    ) {
-      return "Konto z tym adresem e-mail już istnieje. Zaloguj się.";
-    }
     if (lower.includes("not found") || lower.includes("no account")) {
-      return "Nie znaleziono konta dla tego adresu e-mail.";
+      return "Nie znaleziono konta z tym adresem e-mail.";
     }
     if (lower.includes("password") && lower.includes("least")) {
       return "Hasło musi mieć co najmniej 8 znaków.";
@@ -658,31 +811,31 @@ const AuthScreen: React.FC<{
       lower.includes("could not verify code") ||
       lower.includes("kod") && lower.includes("wygas")
     ) {
-      return "Kod potwierdzający jest nieprawidłowy lub wygasł.";
+      return "Kod jest nieprawidłowy albo wygasł.";
     }
     if (lower.includes("email verification")) {
       return "Najpierw potwierdź adres e-mail kodem z wiadomości.";
     }
     if (lower.includes("resend nie jest gotowy produkcyjnie")) {
-      return "Problem z konfiguracją emaili. Administrator musi zweryfikować domenę w Resend i ustawić poprawny adres nadawcy.";
+      return "Konfiguracja e-mail jest niekompletna. Zweryfikuj domenę nadawcy.";
     }
     if (lower.includes("verify a domain at resend.com/domains")) {
-      return "Problem z konfiguracją emaili. Administrator musi zweryfikować domenę w Resend i ustawić poprawny adres nadawcy.";
+      return "Konfiguracja e-mail jest niekompletna. Zweryfikuj domenę nadawcy.";
     }
     if (
       lower.includes("smtp_send_failed") ||
       lower.includes("incorrect authentication data") ||
       lower.includes("invalid login: 535")
     ) {
-      return "Problem z konfiguracją skrzynki e-mail. Sprawdź login/hasło SMTP.";
+      return "Błąd SMTP. Sprawdź login i hasło skrzynki nadawczej.";
     }
     if (lower.includes("failed to fetch") || lower.includes("network")) {
-      return "Brak połączenia z serwerem. Sprawdź internet i spróbuj ponownie.";
+      return "Brak połączenia z serwerem. Sprawdź internet.";
     }
     if (lower.includes("server error")) {
       return "Błąd serwera autoryzacji. Spróbuj ponownie za chwilę.";
     }
-    return "Wystąpił błąd autoryzacji. Spróbuj ponownie.";
+    return fallback;
   };
 
   const clearAuthFeedback = () => {
@@ -690,17 +843,41 @@ const AuthScreen: React.FC<{
     setSuccess(null);
   };
 
+  const startEmailVerificationWindow = (message: string) => {
+    const now = Date.now();
+    setNowMs(now);
+    setVerificationExpiresAtMs(now + OTP_CODE_VALIDITY_SECONDS * 1000);
+    setVerificationResendReadyAtMs(now + OTP_RESEND_COOLDOWN_SECONDS * 1000);
+    setSuccess(message);
+  };
+
+  const clearEmailVerificationWindow = () => {
+    setVerificationCode("");
+    setVerificationExpiresAtMs(null);
+    setVerificationResendReadyAtMs(null);
+  };
+
+  const startResetCodeWindow = (message: string) => {
+    const now = Date.now();
+    setNowMs(now);
+    setResetCodeExpiresAtMs(now + OTP_CODE_VALIDITY_SECONDS * 1000);
+    setResetCodeResendReadyAtMs(now + OTP_RESEND_COOLDOWN_SECONDS * 1000);
+    setSuccess(message);
+  };
+
   const resetPasswordResetState = () => {
     setPasswordResetStep("idle");
     setPasswordResetCode("");
     setNewPassword("");
     setConfirmNewPassword("");
+    setResetCodeExpiresAtMs(null);
+    setResetCodeResendReadyAtMs(null);
   };
 
   const startPasswordReset = () => {
     clearAuthFeedback();
     setAwaitsEmailVerification(false);
-    setVerificationCode("");
+    clearEmailVerificationWindow();
     setPasswordResetStep("request");
     setPassword("");
     setConfirmPassword("");
@@ -751,11 +928,12 @@ const AuthScreen: React.FC<{
       if (result.signingIn) {
         resetPasswordResetState();
         setAwaitsEmailVerification(false);
+        clearEmailVerificationWindow();
         setSuccess(view === "signup" ? "Konto utworzone. Jesteś zalogowany." : "Zalogowano pomyślnie.");
       } else {
         setAwaitsEmailVerification(true);
         resetPasswordResetState();
-        setSuccess(
+        startEmailVerificationWindow(
           view === "signup"
             ? "Wysłaliśmy kod potwierdzający na Twój email."
             : "Hasło poprawne. Wysłaliśmy kod potwierdzający na Twój email.",
@@ -763,7 +941,7 @@ const AuthScreen: React.FC<{
       }
     } catch (err) {
       const rawError = extractErrorMessage(err, "Wystąpił błąd logowania.");
-      const mappedError = mapAuthError(rawError);
+      const mappedError = mapAuthError(rawError, "Nie udało się zalogować.");
       setError(mappedError);
       if (view === "signup" && mappedError.includes("już istnieje")) {
         onChangeView("login");
@@ -794,6 +972,9 @@ const AuthScreen: React.FC<{
       if (cleanVerificationCode.length !== 6) {
         throw new Error("Podaj kod potwierdzający.");
       }
+      if (verificationSecondsLeft !== null && verificationSecondsLeft <= 0) {
+        throw new Error("Kod wygasł. Wyślij nowy kod.");
+      }
 
       const formData = new FormData();
       formData.append("email", cleanEmail);
@@ -803,13 +984,56 @@ const AuthScreen: React.FC<{
       const result = await signIn("password", formData);
       if (result.signingIn) {
         setAwaitsEmailVerification(false);
+        clearEmailVerificationWindow();
         setSuccess("Adres e-mail został potwierdzony. Jesteś zalogowany.");
       } else {
         throw new Error("Kod potwierdzający jest nieprawidłowy lub wygasł.");
       }
     } catch (err) {
       const rawError = extractErrorMessage(err, "Nie udało się potwierdzić adresu e-mail.");
-      setError(mapAuthError(rawError));
+      setError(mapAuthError(rawError, "Nie udało się potwierdzić kodu."));
+    } finally {
+      authRequestInFlightRef.current = false;
+      setIsLoading(false);
+    }
+  };
+
+  const handleResendEmailVerificationCode = async () => {
+    if (verificationResendSecondsLeft > 0) {
+      setError(`Nowy kod możesz wysłać za ${formatSecondsToClock(verificationResendSecondsLeft)}.`);
+      return;
+    }
+    if (authRequestInFlightRef.current || !canResendVerificationCode) {
+      return;
+    }
+
+    authRequestInFlightRef.current = true;
+    setError(null);
+    setSuccess(null);
+    setIsLoading(true);
+
+    try {
+      const cleanEmail = normalizeEmail(email);
+      if (!emailPattern.test(cleanEmail)) {
+        throw new Error("Podaj poprawny adres e-mail.");
+      }
+
+      const formData = new FormData();
+      formData.append("email", cleanEmail);
+      formData.append("password", password);
+      formData.append("flow", view === "signup" ? "signUp" : "signIn");
+      if (view === "signup" && name.trim()) {
+        formData.append("name", name.trim());
+      }
+      if (view === "signup") {
+        formData.append("dominantHand", dominantHand);
+      }
+
+      await signIn("password", formData);
+      startEmailVerificationWindow("Wysłaliśmy nowy kod potwierdzający.");
+    } catch (err) {
+      const rawError = extractErrorMessage(err, "Nie udało się wysłać nowego kodu.");
+      setError(mapAuthError(rawError, "Nie udało się wysłać nowego kodu."));
     } finally {
       authRequestInFlightRef.current = false;
       setIsLoading(false);
@@ -841,10 +1065,10 @@ const AuthScreen: React.FC<{
       setPasswordResetCode("");
       setNewPassword("");
       setConfirmNewPassword("");
-      setSuccess("Wysłaliśmy kod resetu hasła na Twój email.");
+      startResetCodeWindow("Wysłaliśmy kod resetu hasła na Twój email.");
     } catch (err) {
       const rawError = extractErrorMessage(err, "Nie udało się rozpocząć resetu hasła.");
-      setError(mapAuthError(rawError));
+      setError(mapAuthError(rawError, "Nie udało się wysłać kodu resetu."));
     } finally {
       authRequestInFlightRef.current = false;
       setIsLoading(false);
@@ -852,6 +1076,10 @@ const AuthScreen: React.FC<{
   };
 
   const handleResendPasswordResetCode = async () => {
+    if (resetResendSecondsLeft > 0) {
+      setError(`Nowy kod możesz wysłać za ${formatSecondsToClock(resetResendSecondsLeft)}.`);
+      return;
+    }
     if (authRequestInFlightRef.current) {
       return;
     }
@@ -872,10 +1100,10 @@ const AuthScreen: React.FC<{
       await signIn("password", formData);
 
       setPasswordResetStep("verify");
-      setSuccess("Wysłaliśmy nowy kod resetu hasła.");
+      startResetCodeWindow("Wysłaliśmy nowy kod resetu hasła.");
     } catch (err) {
       const rawError = extractErrorMessage(err, "Nie udało się wysłać nowego kodu resetu.");
-      setError(mapAuthError(rawError));
+      setError(mapAuthError(rawError, "Nie udało się wysłać nowego kodu resetu."));
     } finally {
       authRequestInFlightRef.current = false;
       setIsLoading(false);
@@ -901,6 +1129,9 @@ const AuthScreen: React.FC<{
       if (cleanCode.length !== 6) {
         throw new Error("Podaj 6-cyfrowy kod resetu.");
       }
+      if (resetCodeSecondsLeft !== null && resetCodeSecondsLeft <= 0) {
+        throw new Error("Kod resetu wygasł. Wyślij nowy kod.");
+      }
       if (!newPassword || newPassword.length < 8) {
         throw new Error("Nowe hasło musi mieć co najmniej 8 znaków.");
       }
@@ -921,10 +1152,11 @@ const AuthScreen: React.FC<{
 
       resetPasswordResetState();
       setAwaitsEmailVerification(false);
+      clearEmailVerificationWindow();
       setSuccess("Hasło zostało zmienione. Jesteś zalogowany.");
     } catch (err) {
       const rawError = extractErrorMessage(err, "Nie udało się zresetować hasła.");
-      setError(mapAuthError(rawError));
+      setError(mapAuthError(rawError, "Nie udało się ustawić nowego hasła."));
     } finally {
       authRequestInFlightRef.current = false;
       setIsLoading(false);
@@ -948,35 +1180,53 @@ const AuthScreen: React.FC<{
         <div
           className="rounded-3xl p-6"
           style={{
-            background: "rgba(255, 255, 255, 0.06)",
-            backdropFilter: "blur(24px) saturate(180%)",
-            WebkitBackdropFilter: "blur(24px) saturate(180%)",
-            border: "1px solid rgba(255, 255, 255, 0.10)",
-            boxShadow: "0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.12)",
+            background: "rgba(19, 19, 22, 0.84)",
+            backdropFilter: "blur(18px) saturate(140%)",
+            WebkitBackdropFilter: "blur(18px) saturate(140%)",
+            border: "1px solid rgba(255, 255, 255, 0.12)",
+            boxShadow: "0 10px 28px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.09)",
           }}
         >
           <h1 className="text-3xl font-bold text-white text-center mb-1">
             {awaitsEmailVerification
-              ? "Potwierdź email"
+              ? "Potwierdź e-mail"
               : passwordResetStep === "request"
-              ? "Odzyskiwanie hasła"
+              ? "Reset hasła"
               : passwordResetStep === "verify"
-              ? "Nowe hasło"
+              ? "Potwierdź kod resetu"
               : view === "signup"
               ? "Rejestracja"
               : "Logowanie"}
           </h1>
           <p className="text-center text-white/55 text-sm mb-6">
             {awaitsEmailVerification
-              ? `Wpisz kod wysłany na ${normalizeEmail(email)}`
+              ? `Kod wysłaliśmy na ${normalizeEmail(email)}`
               : passwordResetStep === "request"
-              ? "Podaj e-mail konta. Wyślemy kod do resetu hasła."
+              ? "Podaj e-mail. Wyślemy kod do ustawienia nowego hasła."
               : passwordResetStep === "verify"
-              ? `Wpisz kod resetu wysłany na ${normalizeEmail(email)} i ustaw nowe hasło.`
+              ? `Wpisz kod z ${normalizeEmail(email)} i ustaw nowe hasło.`
               : view === "signup"
               ? "Utwórz konto raz i korzystaj na tym urządzeniu bez ponownego logowania."
               : "Zaloguj się raz, a sesja zostanie zapamiętana na tym urządzeniu."}
           </p>
+
+          {awaitsEmailVerification && (
+            <div className="mb-4 rounded-2xl border border-[#30D158]/35 bg-[#30D158]/12 px-3 py-2.5 text-center">
+              <p className="text-[#9AF2B4] text-xs font-medium">Email z kodem został wysłany.</p>
+              <p className="text-white/75 text-xs mt-1">
+                Kod wygasa za {formatSecondsToClock(verificationSecondsLeft ?? OTP_CODE_VALIDITY_SECONDS)}
+              </p>
+            </div>
+          )}
+
+          {passwordResetStep === "verify" && (
+            <div className="mb-4 rounded-2xl border border-[#0A84FF]/35 bg-[#0A84FF]/12 px-3 py-2.5 text-center">
+              <p className="text-[#CDE4FF] text-xs font-medium">Kod resetu został wysłany.</p>
+              <p className="text-white/75 text-xs mt-1">
+                Kod wygasa za {formatSecondsToClock(resetCodeSecondsLeft ?? OTP_CODE_VALIDITY_SECONDS)}
+              </p>
+            </div>
+          )}
 
           {!awaitsEmailVerification && !isPasswordResetFlow ? (
             <form onSubmit={handleAuthSubmit} className="space-y-4">
@@ -1078,7 +1328,7 @@ const AuthScreen: React.FC<{
                 onClick={() => {
                   clearAuthFeedback();
                   setAwaitsEmailVerification(false);
-                  setVerificationCode("");
+                  clearEmailVerificationWindow();
                   resetPasswordResetState();
                   onChangeView(view === "login" ? "signup" : "login");
                 }}
@@ -1133,17 +1383,7 @@ const AuthScreen: React.FC<{
               </form>
             ) : (
               <form onSubmit={handlePasswordResetVerification} className="space-y-4">
-                <div>
-                  <Label className="text-white/55 text-sm mb-2 block">Email</Label>
-                  <Input
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF]"
-                    placeholder="twoj@email.pl"
-                    required
-                  />
-                </div>
+                <p className="text-center text-xs text-white/45">{normalizeEmail(email)}</p>
 
                 <div>
                   <Label className="text-white/55 text-sm mb-2 block">Kod resetu</Label>
@@ -1196,10 +1436,13 @@ const AuthScreen: React.FC<{
 
                 <button
                   type="button"
-                  className="w-full text-center text-white/55 text-sm hover:text-white/75 transition-colors"
+                  className="w-full text-center text-white/55 text-sm hover:text-white/75 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                   onClick={handleResendPasswordResetCode}
+                  disabled={!canResendResetCode}
                 >
-                  Wyślij nowy kod resetu
+                  {canResendResetCode
+                    ? "Wyślij nowy kod resetu"
+                    : `Wyślij ponownie za ${formatSecondsToClock(resetResendSecondsLeft)}`}
                 </button>
 
                 <button
@@ -1240,36 +1483,13 @@ const AuthScreen: React.FC<{
 
               <button
                 type="button"
-                className="w-full text-center text-white/55 text-sm hover:text-white/75 transition-colors"
-                onClick={async () => {
-                  if (authRequestInFlightRef.current) {
-                    return;
-                  }
-
-                  authRequestInFlightRef.current = true;
-                  setError(null);
-                  setSuccess(null);
-                  setIsLoading(true);
-                  try {
-                    const formData = new FormData();
-                    formData.append("email", normalizeEmail(email));
-                    formData.append("password", password);
-                    formData.append("flow", view === "signup" ? "signUp" : "signIn");
-                    if (view === "signup" && name.trim()) {
-                      formData.append("name", name.trim());
-                    }
-                    await signIn("password", formData);
-                    setSuccess("Wysłaliśmy nowy kod potwierdzający.");
-                  } catch (err) {
-                    const rawError = extractErrorMessage(err, "Nie udało się wysłać nowego kodu.");
-                    setError(mapAuthError(rawError));
-                  } finally {
-                    authRequestInFlightRef.current = false;
-                    setIsLoading(false);
-                  }
-                }}
+                className="w-full text-center text-white/55 text-sm hover:text-white/75 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                onClick={handleResendEmailVerificationCode}
+                disabled={!canResendVerificationCode}
               >
-                Wyślij kod ponownie
+                {canResendVerificationCode
+                  ? "Wyślij kod ponownie"
+                  : `Wyślij ponownie za ${formatSecondsToClock(verificationResendSecondsLeft)}`}
               </button>
 
               <button
@@ -1277,7 +1497,7 @@ const AuthScreen: React.FC<{
                 className="w-full text-center text-white/55 text-sm hover:text-white/75 transition-colors"
                 onClick={() => {
                   setAwaitsEmailVerification(false);
-                  setVerificationCode("");
+                  clearEmailVerificationWindow();
                   clearAuthFeedback();
                 }}
               >
@@ -1610,12 +1830,178 @@ const CategoryBadge: React.FC<{ category: PressureCategory }> = ({ category }) =
   );
 };
 
+const SWIPE_DELETE_MAX_OFFSET = -148;
+const SWIPE_DELETE_TRIGGER_OFFSET = -96;
+const SWIPE_DELETE_INSTANT_OFFSET = -220;
+const SWIPE_DELETE_GESTURE_THRESHOLD = 6;
+
+const SwipeDeleteCard: React.FC<{
+  onSwipeDelete: () => boolean | Promise<boolean>;
+  children: React.ReactNode;
+}> = ({ onSwipeDelete, children }) => {
+  const [offsetX, setOffsetX] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+  const axisRef = useRef<"x" | "y" | null>(null);
+  const pointerIdRef = useRef<number | null>(null);
+  const startXRef = useRef(0);
+  const startYRef = useRef(0);
+  const lastXRef = useRef(0);
+  const startOffsetRef = useRef(0);
+  const currentOffsetRef = useRef(0);
+  const hasTriggeredDeleteRef = useRef(false);
+  const releaseDeleteArmedRef = useRef(false);
+
+  const releasePointer = (target: HTMLDivElement) => {
+    const pointerId = pointerIdRef.current;
+    if (pointerId === null) return;
+    try {
+      if (target.hasPointerCapture(pointerId)) {
+        target.releasePointerCapture(pointerId);
+      }
+    } catch {
+      // ignore cross-browser release errors
+    }
+    pointerIdRef.current = null;
+  };
+
+  const triggerDelete = (target: HTMLDivElement, lockedOffset: number) => {
+    if (hasTriggeredDeleteRef.current) return;
+    hasTriggeredDeleteRef.current = true;
+    releaseDeleteArmedRef.current = false;
+    releasePointer(target);
+    setIsDragging(false);
+    axisRef.current = null;
+    currentOffsetRef.current = lockedOffset;
+    setOffsetX(lockedOffset);
+    void Promise.resolve(onSwipeDelete())
+      .catch(() => false)
+      .finally(() => {
+        hasTriggeredDeleteRef.current = false;
+        currentOffsetRef.current = 0;
+        setOffsetX(0);
+      });
+  };
+
+  const finishSwipe = (target: HTMLDivElement, finalClientX?: number) => {
+    const deltaX = (finalClientX ?? lastXRef.current) - startXRef.current;
+    const effectiveOffset = Math.max(
+      SWIPE_DELETE_MAX_OFFSET,
+      Math.min(0, startOffsetRef.current + deltaX),
+    );
+    if (
+      !hasTriggeredDeleteRef.current &&
+      (
+        releaseDeleteArmedRef.current ||
+        effectiveOffset <= SWIPE_DELETE_TRIGGER_OFFSET ||
+        currentOffsetRef.current <= SWIPE_DELETE_TRIGGER_OFFSET
+      )
+    ) {
+      const lockedOffset = Math.min(effectiveOffset, SWIPE_DELETE_MAX_OFFSET);
+      triggerDelete(target, lockedOffset);
+      return;
+    }
+    releasePointer(target);
+    setIsDragging(false);
+    axisRef.current = null;
+    hasTriggeredDeleteRef.current = false;
+    releaseDeleteArmedRef.current = false;
+    currentOffsetRef.current = 0;
+    setOffsetX(0);
+  };
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    pointerIdRef.current = event.pointerId;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    axisRef.current = null;
+    hasTriggeredDeleteRef.current = false;
+    releaseDeleteArmedRef.current = false;
+    startXRef.current = event.clientX;
+    startYRef.current = event.clientY;
+    lastXRef.current = event.clientX;
+    startOffsetRef.current = offsetX;
+    setIsDragging(true);
+  };
+
+  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!isDragging) return;
+
+    const deltaX = event.clientX - startXRef.current;
+    const deltaY = event.clientY - startYRef.current;
+
+    if (axisRef.current === null) {
+      if (
+        Math.abs(deltaX) < SWIPE_DELETE_GESTURE_THRESHOLD &&
+        Math.abs(deltaY) < SWIPE_DELETE_GESTURE_THRESHOLD
+      ) {
+        return;
+      }
+      axisRef.current = Math.abs(deltaX) > Math.abs(deltaY) + 3 ? "x" : "y";
+    }
+
+    if (axisRef.current !== "x") return;
+
+    event.preventDefault();
+    lastXRef.current = event.clientX;
+    const nextOffset = Math.max(
+      SWIPE_DELETE_MAX_OFFSET,
+      Math.min(0, startOffsetRef.current + deltaX),
+    );
+    currentOffsetRef.current = nextOffset;
+    setOffsetX(nextOffset);
+    if (nextOffset <= SWIPE_DELETE_TRIGGER_OFFSET) {
+      releaseDeleteArmedRef.current = true;
+    }
+
+    if (deltaX <= SWIPE_DELETE_INSTANT_OFFSET) {
+      triggerDelete(event.currentTarget, nextOffset);
+      return;
+    }
+  };
+
+  const reveal = Math.min(1, Math.abs(offsetX) / Math.abs(SWIPE_DELETE_MAX_OFFSET));
+  const backdropOpacity = Math.max(0, reveal - 0.03) * 1.1;
+
+  return (
+    <div className="relative overflow-hidden rounded-3xl" style={{ touchAction: "pan-y" }}>
+      <div
+        className="absolute inset-0 flex items-center justify-end px-4"
+        style={{
+          opacity: backdropOpacity,
+          background: "linear-gradient(90deg, rgba(255,69,58,0.08), rgba(255,69,58,0.36))",
+          border: `1px solid rgba(255,69,58,${0.1 + reveal * 0.34})`,
+          boxShadow: `inset 0 0 24px rgba(255,69,58,${0.08 + reveal * 0.26})`,
+        }}
+      >
+        <div className="flex items-center gap-2 text-[#FFB4AF]">
+          <Trash2 className="w-5 h-5" />
+        </div>
+      </div>
+
+      <div
+        className="relative"
+        style={{
+          transform: `translateX(${offsetX}px)`,
+          transition: isDragging ? "none" : "transform 220ms cubic-bezier(0.22, 1, 0.36, 1)",
+        }}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={(event) => finishSwipe(event.currentTarget, event.clientX)}
+        onPointerCancel={(event) => finishSwipe(event.currentTarget, event.clientX)}
+      >
+        {children}
+      </div>
+    </div>
+  );
+};
+
 const PressureTooltipCard: React.FC<{
   active?: boolean;
-  payload?: Array<{ payload?: { sys: number; dia: number; pulse: number } }>;
+  payload?: Array<{ payload?: { sys: number; dia: number; pulse: number; count?: number } }>;
   label?: string | number;
   pressurePrefs?: PressurePreferences;
-}> = ({ active, payload, label, pressurePrefs = defaultMeasurementPreferences.pressure }) => {
+  isCoarsePointer?: boolean;
+}> = ({ active, payload, label, pressurePrefs = defaultMeasurementPreferences.pressure, isCoarsePointer = false }) => {
   const point = payload?.[0]?.payload;
   if (!active || !point) return null;
 
@@ -1625,27 +2011,33 @@ const PressureTooltipCard: React.FC<{
   return (
     <div
       style={{
-        background: "rgba(20, 20, 20, 0.88)",
-        backdropFilter: "blur(24px)",
-        border: "1px solid rgba(255,255,255,0.12)",
-        borderRadius: "12px",
-        padding: "10px 12px",
+        background: "rgba(14, 14, 16, 0.93)",
+        backdropFilter: "blur(16px) saturate(140%)",
+        border: "1px solid rgba(255,255,255,0.16)",
+        borderRadius: "14px",
+        padding: "12px 14px",
         color: "#FFFFFF",
-        minWidth: "180px",
+        minWidth: isCoarsePointer ? "206px" : "190px",
+        boxShadow: "0 10px 26px rgba(0,0,0,0.45)",
       }}
     >
-      <p style={{ fontSize: "12px", opacity: 0.72, marginBottom: "8px" }}>{label}</p>
+      <p style={{ fontSize: "12px", opacity: 0.78, marginBottom: "8px" }}>{label}</p>
+      {typeof point.count === "number" && point.count > 0 && (
+        <p style={{ fontSize: "11px", opacity: 0.65, marginBottom: "8px" }}>
+          Średnia z dnia · {point.count === 1 ? "1 pomiar" : `${point.count} pomiary`}
+        </p>
+      )}
       <div style={{ display: "flex", justifyContent: "space-between", gap: "16px", marginBottom: "6px" }}>
         <span style={{ color: "#7AB8FF", fontSize: "12px" }}>SYS</span>
-        <span style={{ fontWeight: 700 }}>{formatValueOrDash(point.sys)}</span>
+        <span style={{ fontWeight: 700, fontSize: "14px" }}>{formatPreciseValueOrDash(point.sys)}</span>
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", gap: "16px", marginBottom: "6px" }}>
         <span style={{ color: "#FFB454", fontSize: "12px" }}>DIA</span>
-        <span style={{ fontWeight: 700 }}>{formatValueOrDash(point.dia)}</span>
+        <span style={{ fontWeight: 700, fontSize: "14px" }}>{formatPreciseValueOrDash(point.dia)}</span>
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", gap: "16px", marginBottom: "8px" }}>
         <span style={{ color: "rgba(255,255,255,0.68)", fontSize: "12px" }}>Puls</span>
-        <span style={{ fontWeight: 600 }}>{formatValueOrDash(point.pulse)} bpm</span>
+        <span style={{ fontWeight: 600, fontSize: "14px" }}>{formatPreciseValueOrDash(point.pulse)} bpm</span>
       </div>
       <span
         style={{
@@ -1660,6 +2052,11 @@ const PressureTooltipCard: React.FC<{
       >
         {getCategoryLabel(category)}
       </span>
+      {isCoarsePointer && (
+        <p style={{ marginTop: "8px", fontSize: "10px", opacity: 0.65 }}>
+          Przytrzymaj punkt na wykresie, aby odczytać wartości.
+        </p>
+      )}
     </div>
   );
 };
@@ -1676,11 +2073,11 @@ const GlassCard: React.FC<{ children: React.ReactNode; className?: string }> = (
     <div
       className={`rounded-3xl p-6 ${className}`}
       style={{
-        background: "rgba(255, 255, 255, 0.06)",
-        backdropFilter: "blur(24px) saturate(180%)",
-        WebkitBackdropFilter: "blur(24px) saturate(180%)",
-        border: "1px solid rgba(255, 255, 255, 0.10)",
-        boxShadow: "0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.12)",
+        background: "rgba(19, 19, 22, 0.82)",
+        backdropFilter: "blur(18px) saturate(140%)",
+        WebkitBackdropFilter: "blur(18px) saturate(140%)",
+        border: "1px solid rgba(255, 255, 255, 0.12)",
+        boxShadow: "0 10px 28px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.09)",
       }}
     >
       {children}
@@ -1748,7 +2145,7 @@ const SettingsActionButton: React.FC<{
   <button
     type="button"
     onClick={onClick}
-    className="w-full h-16 rounded-3xl border border-white/10 bg-white/[0.03] hover:bg-white/[0.06] text-white text-xl font-semibold inline-flex items-center justify-center gap-2 transition-colors"
+    className="w-full h-16 rounded-3xl border border-white/10 bg-white/[0.03] hover:bg-white/[0.06] text-white text-lg font-semibold inline-flex items-center justify-center gap-2 transition-colors"
   >
     <Icon className="w-5 h-5 text-white/85" />
     <span>{children}</span>
@@ -1966,6 +2363,10 @@ const BloodPressureApp: React.FC = () => {
   const [newPasswordInput, setNewPasswordInput] = useState("");
   const [confirmNewPasswordInput, setConfirmNewPasswordInput] = useState("");
   const [isChangingPassword, setIsChangingPassword] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportDateFrom, setExportDateFrom] = useState(() => toDateInput(addDays(new Date(), -29)));
+  const [exportDateTo, setExportDateTo] = useState(() => toDateInput(new Date()));
   const [showDeleteAccountModal, setShowDeleteAccountModal] = useState(false);
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
   const [deleteAccountConfirmText, setDeleteAccountConfirmText] = useState("");
@@ -2113,30 +2514,240 @@ const BloodPressureApp: React.FC = () => {
     setDraftPreferences(defaultMeasurementPreferences);
   };
 
-  const handleExportData = () => {
-    const payload = {
-      exportedAt: new Date().toISOString(),
-      user: userData,
-      preferences,
-      readings: readings.map((reading) => ({
-        ...reading,
-        timestamp: reading.timestamp.toISOString(),
-        pressureCategory: classifyPressure(reading.systolic, reading.diastolic, preferences.pressure),
-        pulseCategory: classifyPulse(reading.pulse, preferences.pulse),
-      })),
-    };
+  const parseDateInputToBoundary = (value: string, endOfDay: boolean): Date | null => {
+    const [yearRaw, monthRaw, dayRaw] = value.split("-");
+    const year = Number(yearRaw);
+    const month = Number(monthRaw);
+    const day = Number(dayRaw);
+    if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+      return null;
+    }
+    return endOfDay
+      ? new Date(year, month - 1, day, 23, 59, 59, 999)
+      : new Date(year, month - 1, day, 0, 0, 0, 0);
+  };
 
-    const blob = new Blob([JSON.stringify(payload, null, 2)], {
-      type: "application/json;charset=utf-8",
+  const buildDoctorReportDataset = () => {
+    const rangeStart = parseDateInputToBoundary(exportDateFrom, false);
+    const rangeEnd = parseDateInputToBoundary(exportDateTo, true);
+    if (!rangeStart || !rangeEnd || rangeStart.getTime() > rangeEnd.getTime()) {
+      throw new Error("Zakres dat jest nieprawidłowy.");
+    }
+
+    const inRange = readings
+      .filter((reading) => {
+        const timestamp = reading.timestamp.getTime();
+        return timestamp >= rangeStart.getTime() && timestamp <= rangeEnd.getTime();
+      })
+      .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+
+    const rows = inRange.map((reading) => {
+      const display = getDisplayReadingValues(reading);
+      const pressureCategory = classifyPressure(display.systolic, display.diastolic, preferences.pressure);
+      const pulseCategory = classifyPulse(display.pulse, preferences.pulse);
+      const primary = reading;
+      const secondary = reading.secondArm;
+      const left =
+        primary.arm === "left"
+          ? { systolic: primary.systolic, diastolic: primary.diastolic, pulse: primary.pulse }
+          : secondary?.arm === "left"
+            ? { systolic: secondary.systolic, diastolic: secondary.diastolic, pulse: secondary.pulse }
+            : null;
+      const right =
+        primary.arm === "right"
+          ? { systolic: primary.systolic, diastolic: primary.diastolic, pulse: primary.pulse }
+          : secondary?.arm === "right"
+            ? { systolic: secondary.systolic, diastolic: secondary.diastolic, pulse: secondary.pulse }
+            : null;
+
+      return {
+        reading,
+        display,
+        pressureCategory,
+        pulseCategory,
+        left,
+        right,
+      };
     });
+
+    const anomalies = rows.filter(
+      (row) => row.pressureCategory !== "normal" || row.pulseCategory !== "normal",
+    );
+    const sysValues = rows.map((row) => row.display.systolic);
+    const diaValues = rows.map((row) => row.display.diastolic);
+    const pulseValues = rows.map((row) => row.display.pulse);
+
+    return {
+      rangeStart,
+      rangeEnd,
+      rows,
+      anomalies,
+      summary: {
+        count: rows.length,
+        avgSys: averageRounded(sysValues),
+        avgDia: averageRounded(diaValues),
+        avgPulse: averageRounded(pulseValues),
+        stdSys: standardDeviation(sysValues),
+        stdDia: standardDeviation(diaValues),
+        stdPulse: standardDeviation(pulseValues),
+      },
+    };
+  };
+
+  const downloadDoctorReportCsv = () => {
+    const report = buildDoctorReportDataset();
+    if (report.rows.length === 0) {
+      throw new Error("Brak pomiarów w wybranym zakresie dat.");
+    }
+
+    const csvLines: string[] = [];
+    csvLines.push(`Raport ciśnienia;${formatDate(report.rangeStart)} - ${formatDate(report.rangeEnd)}`);
+    csvLines.push(`Pacjent;${userData?.name ?? "Użytkownik"};${userData?.email ?? ""}`);
+    csvLines.push(
+      `Liczba pomiarów;${report.summary.count};Anomalie;${report.anomalies.length}`,
+    );
+    csvLines.push(
+      `Średnia SYS;${report.summary.avgSys ?? "--"};Odchylenie SYS;${report.summary.stdSys ?? "--"}`,
+    );
+    csvLines.push(
+      `Średnia DIA;${report.summary.avgDia ?? "--"};Odchylenie DIA;${report.summary.stdDia ?? "--"}`,
+    );
+    csvLines.push(
+      `Średni puls;${report.summary.avgPulse ?? "--"};Odchylenie pulsu;${report.summary.stdPulse ?? "--"}`,
+    );
+    csvLines.push("");
+    csvLines.push(
+      "Data;Godzina;SYS;DIA;Puls;Kategoria ciśnienia;Kategoria pulsu;Tryb;Lewa ręka;Prawa ręka;Notatka",
+    );
+
+    for (const row of report.rows) {
+      const leftValue = row.left
+        ? `${row.left.systolic}/${row.left.diastolic} ${row.left.pulse} bpm`
+        : "";
+      const rightValue = row.right
+        ? `${row.right.systolic}/${row.right.diastolic} ${row.right.pulse} bpm`
+        : "";
+
+      csvLines.push(
+        [
+          formatDate(row.reading.timestamp),
+          formatTime(row.reading.timestamp),
+          String(row.display.systolic),
+          String(row.display.diastolic),
+          String(row.display.pulse),
+          getCategoryLabel(row.pressureCategory),
+          getPulseCategoryLabel(row.pulseCategory),
+          row.reading.secondArm ? "2 ręce" : "1 ręka",
+          leftValue,
+          rightValue,
+          (row.reading.note ?? "").replace(/\r?\n/g, " ").replace(/;/g, ","),
+        ].join(";"),
+      );
+    }
+
+    const csvContent = `\ufeff${csvLines.join("\n")}`;
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = `cisnienie-export-${new Date().toISOString().slice(0, 10)}.json`;
+    anchor.download = `raport-cisnienia-${exportDateFrom}-${exportDateTo}.csv`;
     document.body.appendChild(anchor);
     anchor.click();
     document.body.removeChild(anchor);
     URL.revokeObjectURL(url);
+  };
+
+  const downloadDoctorReportPdf = () => {
+    const report = buildDoctorReportDataset();
+    if (report.rows.length === 0) {
+      throw new Error("Brak pomiarów w wybranym zakresie dat.");
+    }
+
+    const doc = new jsPDF({ unit: "pt", format: "a4" });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const marginX = 40;
+    const maxY = pageHeight - 42;
+    let y = 48;
+
+    const writeLine = (text: string, fontSize = 11, isBold = false) => {
+      if (y > maxY) {
+        doc.addPage();
+        y = 48;
+      }
+      doc.setFont("helvetica", isBold ? "bold" : "normal");
+      doc.setFontSize(fontSize);
+      const lines = doc.splitTextToSize(toPdfSafeText(text), pageWidth - marginX * 2);
+      doc.text(lines, marginX, y);
+      y += lines.length * (fontSize + 3);
+    };
+
+    writeLine("Raport ciśnienia tętniczego", 18, true);
+    writeLine(`${formatDate(report.rangeStart)} - ${formatDate(report.rangeEnd)}`, 12, false);
+    y += 4;
+    writeLine(`Pacjent: ${userData?.name ?? "Użytkownik"} (${userData?.email ?? "brak e-maila"})`, 11, false);
+    writeLine(`Liczba pomiarów: ${report.summary.count}`, 11, false);
+    writeLine(`Liczba anomalii: ${report.anomalies.length}`, 11, false);
+    y += 4;
+    writeLine("Statystyki (wartości uśrednione dla pomiarów 2-ręcznych):", 12, true);
+    writeLine(
+      `SYS: średnia ${report.summary.avgSys ?? "--"} mmHg, odchylenie ${report.summary.stdSys ?? "--"}`,
+      11,
+      false,
+    );
+    writeLine(
+      `DIA: średnia ${report.summary.avgDia ?? "--"} mmHg, odchylenie ${report.summary.stdDia ?? "--"}`,
+      11,
+      false,
+    );
+    writeLine(
+      `Puls: średnia ${report.summary.avgPulse ?? "--"} bpm, odchylenie ${report.summary.stdPulse ?? "--"}`,
+      11,
+      false,
+    );
+
+    y += 8;
+    writeLine("Lista anomalii:", 12, true);
+    if (report.anomalies.length === 0) {
+      writeLine("Brak anomalii w wybranym zakresie.", 11, false);
+    } else {
+      for (const row of report.anomalies) {
+        writeLine(
+          `${formatDate(row.reading.timestamp)} ${formatTime(row.reading.timestamp)} | ${row.display.systolic}/${row.display.diastolic} | ${row.display.pulse} bpm | ${getCategoryLabel(row.pressureCategory)} / ${getPulseCategoryLabel(row.pulseCategory)}`,
+          10,
+          false,
+        );
+      }
+    }
+
+    y += 8;
+    writeLine("Wszystkie pomiary:", 12, true);
+    for (const row of report.rows) {
+      writeLine(
+        `${formatDate(row.reading.timestamp)} ${formatTime(row.reading.timestamp)} | ${row.display.systolic}/${row.display.diastolic} | ${row.display.pulse} bpm | ${row.reading.secondArm ? "2 ręce" : "1 ręka"}`,
+        10,
+        false,
+      );
+    }
+
+    doc.save(`raport-cisnienia-${exportDateFrom}-${exportDateTo}.pdf`);
+  };
+
+  const handleExportData = async (format: "csv" | "pdf") => {
+    setIsExporting(true);
+    setDataSyncError(null);
+    try {
+      if (format === "csv") {
+        downloadDoctorReportCsv();
+      } else {
+        downloadDoctorReportPdf();
+      }
+      setShowExportModal(false);
+    } catch (error) {
+      setDataSyncError(extractErrorMessage(error, "Nie udało się wygenerować raportu."));
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   const getPressureCategory = (sys: number, dia: number) => classifyPressure(sys, dia, preferences.pressure);
@@ -2198,6 +2809,13 @@ const BloodPressureApp: React.FC = () => {
   const handleConfirmDeleteReading = async () => {
     if (!pendingDeleteReadingId) return;
     await handleDeleteReading(pendingDeleteReadingId);
+  };
+
+  const handleSwipeDeleteReading = async (id: Id<"readings">): Promise<boolean> => {
+    const confirmed = window.confirm("Czy na pewno chcesz usunąć ten pomiar?");
+    if (!confirmed) return false;
+    await handleDeleteReading(id);
+    return true;
   };
 
   const toggleHistoryReadingDetails = (readingId: Id<"readings">) => {
@@ -2346,22 +2964,31 @@ const BloodPressureApp: React.FC = () => {
     return [...inRange].sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
   }, [readings, timeRange]);
 
+  const filteredDisplayReadings = useMemo(
+    () =>
+      filteredReadings.map((reading) => ({
+        reading,
+        ...getDisplayReadingValues(reading),
+      })),
+    [filteredReadings],
+  );
+
   const chartData = useMemo(() => {
     const dailyMap = new Map<number, { sysSum: number; diaSum: number; pulseSum: number; count: number }>();
 
-    for (const reading of filteredReadings) {
-      const dayStamp = startOfLocalDay(reading.timestamp).getTime();
+    for (const row of filteredDisplayReadings) {
+      const dayStamp = startOfLocalDay(row.reading.timestamp).getTime();
       const current = dailyMap.get(dayStamp);
       if (current) {
-        current.sysSum += reading.systolic;
-        current.diaSum += reading.diastolic;
-        current.pulseSum += reading.pulse;
+        current.sysSum += row.systolic;
+        current.diaSum += row.diastolic;
+        current.pulseSum += row.pulse;
         current.count += 1;
       } else {
         dailyMap.set(dayStamp, {
-          sysSum: reading.systolic,
-          diaSum: reading.diastolic,
-          pulseSum: reading.pulse,
+          sysSum: row.systolic,
+          diaSum: row.diastolic,
+          pulseSum: row.pulse,
           count: 1,
         });
       }
@@ -2371,9 +2998,10 @@ const BloodPressureApp: React.FC = () => {
       .sort((a, b) => a[0] - b[0])
       .map(([dayStamp, bucket]) => ({
         date: formatDate(new Date(dayStamp)),
-        sys: Math.round(bucket.sysSum / bucket.count),
-        dia: Math.round(bucket.diaSum / bucket.count),
-        pulse: Math.round(bucket.pulseSum / bucket.count),
+        sys: Number((bucket.sysSum / bucket.count).toFixed(1)),
+        dia: Number((bucket.diaSum / bucket.count).toFixed(1)),
+        pulse: Number((bucket.pulseSum / bucket.count).toFixed(1)),
+        count: bucket.count,
       }));
 
     const maxPoints: Record<TimeRange, number> = {
@@ -2384,37 +3012,52 @@ const BloodPressureApp: React.FC = () => {
     };
 
     return points.slice(-maxPoints[timeRange]);
-  }, [filteredReadings, timeRange]);
+  }, [filteredDisplayReadings, timeRange]);
 
   const stats = useMemo(() => {
-    if (filteredReadings.length === 0) return null;
+    if (filteredDisplayReadings.length === 0) return null;
 
-    const avgSys = Math.round(filteredReadings.reduce((sum, reading) => sum + reading.systolic, 0) / filteredReadings.length);
-    const avgDia = Math.round(filteredReadings.reduce((sum, reading) => sum + reading.diastolic, 0) / filteredReadings.length);
-    const avgPulse = Math.round(filteredReadings.reduce((sum, reading) => sum + reading.pulse, 0) / filteredReadings.length);
-    const normalCount = filteredReadings.filter(
-      (reading) => classifyPressure(reading.systolic, reading.diastolic, preferences.pressure) === "normal"
+    const avgSys = Math.round(
+      filteredDisplayReadings.reduce((sum, row) => sum + row.systolic, 0) / filteredDisplayReadings.length,
+    );
+    const avgDia = Math.round(
+      filteredDisplayReadings.reduce((sum, row) => sum + row.diastolic, 0) / filteredDisplayReadings.length,
+    );
+    const avgPulse = Math.round(
+      filteredDisplayReadings.reduce((sum, row) => sum + row.pulse, 0) / filteredDisplayReadings.length,
+    );
+    const normalCount = filteredDisplayReadings.filter(
+      (row) => classifyPressure(row.systolic, row.diastolic, preferences.pressure) === "normal"
     ).length;
-    const normalPercent = Math.round((normalCount / filteredReadings.length) * 100);
+    const normalPercent = Math.round((normalCount / filteredDisplayReadings.length) * 100);
 
     return { avgSys, avgDia, avgPulse, normalPercent };
-  }, [filteredReadings, preferences.pressure]);
+  }, [filteredDisplayReadings, preferences.pressure]);
 
   const analyticsYDomain: [number, number] = [PRESSURE_RULES.chartMin, PRESSURE_RULES.chartMax];
   const pressureZones: Array<{ key: string; y1: number; y2: number; fill: string }> = [
     { key: "normal", y1: preferences.pressure.lowDia, y2: preferences.pressure.elevatedSys - 1, fill: "rgba(48, 209, 88, 0.08)" },
     { key: "high2", y1: preferences.pressure.high2Sys, y2: PRESSURE_RULES.chartMax, fill: "rgba(255, 69, 58, 0.10)" },
   ];
-  const chartTooltipTrigger = isCoarsePointer ? "click" : "hover";
-  const chartDotRadius = isCoarsePointer ? 5 : 4;
-  const chartActiveDotRadius = isCoarsePointer ? 8 : 6;
+  const chartTooltipTrigger: "hover" | "click" = "hover";
+  const chartDotRadius = isCoarsePointer ? 7 : 4;
+  const chartActiveDotRadius = isCoarsePointer ? 11 : 7;
 
+  const latestReading = readings[0] ?? null;
+  const latestDisplayValues = latestReading ? getDisplayReadingValues(latestReading) : null;
   const latestPulseCategory =
-    readings.length > 0 ? getPulseCategory(readings[0].pulse) : null;
+    latestDisplayValues ? getPulseCategory(latestDisplayValues.pulse) : null;
+  const latestPressureCategory =
+    latestDisplayValues
+      ? getPressureCategory(latestDisplayValues.systolic, latestDisplayValues.diastolic)
+      : null;
   const streak = useMemo(() => calculateStreak(readings), [readings]);
   const streakGraphic = getStreakGraphic(streak.current, streak.hasTodayEntry);
   const localNow = new Date();
-  const welcomeLine = getWelcomeLine(userData?.name ?? "Użytkowniku", userData?.loginCount ?? 0);
+  const welcomeLine = useMemo(
+    () => getWelcomeLine(userData?.name ?? "Użytkowniku", userData?.loginCount ?? 0),
+    [userData?.name, userData?.loginCount],
+  );
   const isUserDataLoading = isAuthenticated && userData === undefined;
 
   if (isAuthLoading) {
@@ -2635,8 +3278,15 @@ const BloodPressureApp: React.FC = () => {
 
                   <div className="pt-1 flex flex-col items-center gap-3">
                     <div className="w-full max-w-[280px]">
-                      <SettingsActionButton icon={Download} onClick={handleExportData}>
-                        Eksport danych
+                      <SettingsActionButton
+                        icon={Download}
+                        onClick={() => {
+                          setExportDateFrom(toDateInput(addDays(new Date(), -29)));
+                          setExportDateTo(toDateInput(new Date()));
+                          setShowExportModal(true);
+                        }}
+                      >
+                        Raport lekarza
                       </SettingsActionButton>
                     </div>
                     <div className="w-full max-w-[280px]">
@@ -2752,6 +3402,74 @@ const BloodPressureApp: React.FC = () => {
           </div>
         )}
 
+        {showExportModal && (
+          <div
+            className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm p-4 flex items-end sm:items-center justify-center"
+            onClick={() => setShowExportModal(false)}
+          >
+            <div className="w-full max-w-md" onClick={(event) => event.stopPropagation()}>
+              <GlassCard className="p-5 space-y-4">
+                <h3 className="text-white text-lg font-semibold">Raport dla lekarza</h3>
+                <p className="text-white/65 text-sm">
+                  Wybierz zakres dat. Raport zawiera średnie, odchylenia i listę anomalii.
+                </p>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <Label className="text-white/55 text-sm mb-2 block">Od</Label>
+                    <Input
+                      type="date"
+                      value={exportDateFrom}
+                      max={exportDateTo}
+                      onChange={(event) => setExportDateFrom(event.target.value)}
+                      className="bg-white/5 border-white/10 text-white"
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-white/55 text-sm mb-2 block">Do</Label>
+                    <Input
+                      type="date"
+                      value={exportDateTo}
+                      min={exportDateFrom}
+                      onChange={(event) => setExportDateTo(event.target.value)}
+                      className="bg-white/5 border-white/10 text-white"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleExportData("csv");
+                    }}
+                    className="h-11 rounded-xl border border-white/10 bg-white/5 text-white/85 hover:bg-white/10 transition-colors disabled:opacity-45 disabled:cursor-not-allowed"
+                    disabled={isExporting}
+                  >
+                    {isExporting ? "Tworzenie..." : "Eksport CSV"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleExportData("pdf");
+                    }}
+                    className="h-11 rounded-xl border border-[#0A84FF]/40 bg-[#0A84FF]/20 text-[#B7D8FF] hover:bg-[#0A84FF]/30 transition-colors disabled:opacity-45 disabled:cursor-not-allowed"
+                    disabled={isExporting}
+                  >
+                    {isExporting ? "Tworzenie..." : "Eksport PDF"}
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowExportModal(false)}
+                  className="h-10 rounded-xl border border-white/10 bg-white/[0.03] text-white/75 text-sm hover:bg-white/[0.07] transition-colors"
+                  disabled={isExporting}
+                >
+                  Anuluj
+                </button>
+              </GlassCard>
+            </div>
+          </div>
+        )}
+
         {showDeleteAccountModal && (
           <div
             className="fixed inset-0 z-50 bg-black/65 backdrop-blur-sm p-4 flex items-end sm:items-center justify-center"
@@ -2858,17 +3576,17 @@ const BloodPressureApp: React.FC = () => {
                       <h2 className="text-white/55 text-sm font-medium mb-4">Ostatni pomiar</h2>
                       <div className="flex items-center justify-center mb-4 tabular-nums">
                         <span className="text-white font-bold" style={{ fontSize: "72px", letterSpacing: "-2px" }}>
-                          {formatValueOrDash(readings[0]?.systolic)}
+                          {formatValueOrDash(latestDisplayValues?.systolic)}
                         </span>
                         <span className="text-white/55 font-bold text-5xl mx-2">/</span>
                         <span className="text-white font-bold" style={{ fontSize: "72px", letterSpacing: "-2px" }}>
-                          {formatValueOrDash(readings[0]?.diastolic)}
+                          {formatValueOrDash(latestDisplayValues?.diastolic)}
                         </span>
                       </div>
 
                       <div className="flex items-center justify-center gap-2 mb-4">
                         <Heart className="w-5 h-5 text-white/55" />
-                        <span className="text-white text-2xl font-semibold tabular-nums">{formatValueOrDash(readings[0]?.pulse)}</span>
+                        <span className="text-white text-2xl font-semibold tabular-nums">{formatValueOrDash(latestDisplayValues?.pulse)}</span>
                         <span className="text-white/55 text-lg">bpm</span>
                       </div>
                       {latestPulseCategory && (
@@ -2879,19 +3597,18 @@ const BloodPressureApp: React.FC = () => {
                           {getPulseCategoryLabel(latestPulseCategory)}
                         </p>
                       )}
-                      {readings[0]?.secondArm && (
+                      {latestReading?.secondArm && (
                         <p className="text-white/55 text-center text-sm mb-3">
-                          {getArmLabel(readings[0].secondArm.arm)}: {formatValueOrDash(readings[0].secondArm.systolic)}/
-                          {formatValueOrDash(readings[0].secondArm.diastolic)} • {formatValueOrDash(readings[0].secondArm.pulse)} bpm
+                          Średnia z 2 rąk · {getArmLabel(latestReading.arm)} + {getArmLabel(latestReading.secondArm.arm)}
                         </p>
                       )}
 
                       <div className="flex justify-center mb-3">
-                        <CategoryBadge category={getPressureCategory(readings[0].systolic, readings[0].diastolic)} />
+                        {latestPressureCategory && <CategoryBadge category={latestPressureCategory} />}
                       </div>
 
                       <p className="text-white/30 text-center text-sm">
-                        {formatTime(readings[0].timestamp)} • {formatDate(readings[0].timestamp)}
+                        {latestReading ? `${formatTime(latestReading.timestamp)} • ${formatDate(latestReading.timestamp)}` : "--"}
                       </p>
                     </GlassCard>
 
@@ -2966,7 +3683,7 @@ const BloodPressureApp: React.FC = () => {
         )}
 
         {currentTab === "history" && (
-          <div className="p-6 space-y-4">
+          <div className="p-6 space-y-5">
             <h1 className="text-white text-3xl font-bold mb-6 pt-4">Historia</h1>
             {isUserDataLoading ? (
               <>
@@ -3003,39 +3720,50 @@ const BloodPressureApp: React.FC = () => {
                   : reading.pulse;
                 const displayPulseCategory = getPulseCategory(displayPulse);
                 const isExpanded = expandedHistoryReadingIds.has(reading.id);
+                const pressureCategory = getPressureCategory(displaySystolic, displayDiastolic);
+                const primaryArmLabel = getArmLabel(reading.arm);
+                const secondaryArmLabel = secondArm ? getArmLabel(secondArm.arm) : "";
 
                 return (
-                  <GlassCard key={reading.id} className="relative">
-                    <div className="flex items-center justify-between">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2 mb-2">
-                          <p className="text-white/55 text-sm">{formatTime(reading.timestamp)}</p>
+                  <SwipeDeleteCard key={reading.id} onSwipeDelete={() => handleSwipeDeleteReading(reading.id)}>
+                    <GlassCard className="relative">
+                      <div className="min-w-0">
+                        <div className="flex items-center justify-between gap-2 mb-2.5">
+                          <p className="text-white/55 text-xs sm:text-sm whitespace-nowrap">
+                            {formatTime(reading.timestamp)} • {formatDate(reading.timestamp)}
+                          </p>
                           {hasSecondArm && (
-                            <span className="rounded-full border border-white/15 bg-white/[0.05] px-2 py-0.5 text-[10px] text-white/65 tracking-wide uppercase">
-                              Pomiar 2 rąk
+                            <span className="rounded-full border border-white/15 bg-white/[0.05] px-2 py-0.5 text-[10px] text-white/65 tracking-wide">
+                              2 ręce
                             </span>
                           )}
                         </div>
-                        <div className="flex items-center gap-2 mb-2">
-                          <span className="text-white text-3xl font-bold tabular-nums">
+                        <div className="flex items-end gap-2 mb-2 flex-wrap">
+                          <span className="text-white text-3xl font-semibold tabular-nums leading-none">
                             {formatValueOrDash(displaySystolic)}/{formatValueOrDash(displayDiastolic)}
                           </span>
                           <span
-                            className="text-lg whitespace-nowrap tabular-nums"
+                            className="text-2xl whitespace-nowrap tabular-nums leading-none"
                             style={{ color: getPulseCategoryColor(displayPulseCategory) }}
                           >
-                            • {formatValueOrDash(displayPulse)} bpm
+                            · {formatValueOrDash(displayPulse)} bpm
                           </span>
                         </div>
-                        <p className="text-xs mb-2" style={{ color: getPulseCategoryColor(displayPulseCategory) }}>
-                          {getPulseCategoryLabel(displayPulseCategory)}
-                        </p>
+                        <div className="mb-2.5 flex items-center justify-between gap-3 flex-wrap">
+                          <p className="text-xs" style={{ color: getPulseCategoryColor(displayPulseCategory) }}>
+                            {getPulseCategoryLabel(displayPulseCategory)}
+                          </p>
+                          <div className="inline-flex items-center gap-1.5">
+                            <span className="text-[11px] tracking-wide text-white/45">Ciśnienie</span>
+                            <CategoryBadge category={pressureCategory} />
+                          </div>
+                        </div>
 
                         {secondArm ? (
                           <>
-                            <div className="mb-1 flex items-center justify-between gap-2">
-                              <p className="text-white/40 text-xs">
-                                {getArmLabel(reading.arm)} + {getArmLabel(secondArm.arm)}
+                            <div className="mb-0.5 flex items-center justify-between gap-2">
+                              <p className="text-white/40 text-xs leading-5">
+                                {primaryArmLabel} + {secondaryArmLabel}
                               </p>
                               <button
                                 type="button"
@@ -3064,23 +3792,13 @@ const BloodPressureApp: React.FC = () => {
                             )}
                           </>
                         ) : (
-                          <p className="text-white/40 text-xs mb-1">Ręka: {getArmLabel(reading.arm)}</p>
+                          <p className="text-white/40 text-xs mb-1">{getArmLabel(reading.arm)}</p>
                         )}
 
                         {reading.note && <p className="text-white/30 text-sm italic mt-2">{reading.note}</p>}
                       </div>
-
-                      <div className="flex flex-col items-end gap-2">
-                        <CategoryBadge category={getPressureCategory(displaySystolic, displayDiastolic)} />
-                        <button
-                          onClick={() => setPendingDeleteReadingId(reading.id)}
-                          className="p-2 rounded-lg hover:bg-white/10 transition-colors"
-                        >
-                          <Trash2 className="w-5 h-5 text-white/55" />
-                        </button>
-                      </div>
-                    </div>
-                  </GlassCard>
+                    </GlassCard>
+                  </SwipeDeleteCard>
                 );
               })
             )}
@@ -3135,12 +3853,17 @@ const BloodPressureApp: React.FC = () => {
                 </div>
 
                 <GlassCard>
-                  <h3 className="text-white text-lg font-semibold mb-4">Wykres ciśnienia</h3>
+                  <h3 className="text-white text-lg font-semibold mb-1">Wykres ciśnienia</h3>
+                  {isCoarsePointer && (
+                    <p className="text-white/55 text-xs mb-3">
+                      Dotknij i przytrzymaj punkt, aby podejrzeć dokładne wartości.
+                    </p>
+                  )}
                   {filteredReadings.length <= 1 ? (
                     <p className="text-white/65 text-sm">Dodaj więcej pomiarów aby zobaczyć trend.</p>
                   ) : (
-                    <ResponsiveContainer width="100%" height={250}>
-                      <LineChart data={chartData}>
+                    <ResponsiveContainer width="100%" height={isCoarsePointer ? 280 : 250}>
+                      <LineChart data={chartData} margin={{ top: 10, right: 6, left: -8, bottom: 2 }}>
                         {pressureZones.map((zone) => (
                           <ReferenceArea
                             key={zone.key}
@@ -3161,7 +3884,7 @@ const BloodPressureApp: React.FC = () => {
                           trigger={chartTooltipTrigger}
                           shared
                           cursor={{ stroke: "rgba(255,255,255,0.26)", strokeDasharray: "4 4" }}
-                          content={<PressureTooltipCard pressurePrefs={preferences.pressure} />}
+                          content={<PressureTooltipCard pressurePrefs={preferences.pressure} isCoarsePointer={isCoarsePointer} />}
                         />
                         <ReferenceLine
                           y={stats.avgSys}
