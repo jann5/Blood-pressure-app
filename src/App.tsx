@@ -1830,26 +1830,32 @@ const CategoryBadge: React.FC<{ category: PressureCategory }> = ({ category }) =
   );
 };
 
-const SWIPE_DELETE_MAX_OFFSET = -148;
-const SWIPE_DELETE_TRIGGER_OFFSET = -96;
-const SWIPE_DELETE_INSTANT_OFFSET = -220;
-const SWIPE_DELETE_GESTURE_THRESHOLD = 6;
+const SWIPE_REVEAL_OFFSET = -96;
+const SWIPE_OPEN_THRESHOLD = -56;
+const SWIPE_GESTURE_THRESHOLD = 6;
 
 const SwipeDeleteCard: React.FC<{
-  onSwipeDelete: () => boolean | Promise<boolean>;
+  onRequestDelete: () => void;
+  isOpen: boolean;
+  onOpenChange: (nextOpen: boolean) => void;
+  disabled?: boolean;
   children: React.ReactNode;
-}> = ({ onSwipeDelete, children }) => {
-  const [offsetX, setOffsetX] = useState(0);
+}> = ({ onRequestDelete, isOpen, onOpenChange, disabled = false, children }) => {
+  const [offsetX, setOffsetX] = useState(isOpen ? SWIPE_REVEAL_OFFSET : 0);
   const [isDragging, setIsDragging] = useState(false);
   const axisRef = useRef<"x" | "y" | null>(null);
   const pointerIdRef = useRef<number | null>(null);
   const startXRef = useRef(0);
   const startYRef = useRef(0);
-  const lastXRef = useRef(0);
   const startOffsetRef = useRef(0);
-  const currentOffsetRef = useRef(0);
-  const hasTriggeredDeleteRef = useRef(false);
-  const releaseDeleteArmedRef = useRef(false);
+  const currentOffsetRef = useRef(isOpen ? SWIPE_REVEAL_OFFSET : 0);
+
+  useEffect(() => {
+    if (isDragging) return;
+    const nextOffset = isOpen ? SWIPE_REVEAL_OFFSET : 0;
+    currentOffsetRef.current = nextOffset;
+    setOffsetX(nextOffset);
+  }, [isOpen, isDragging]);
 
   const releasePointer = (target: HTMLDivElement) => {
     const pointerId = pointerIdRef.current;
@@ -1864,75 +1870,39 @@ const SwipeDeleteCard: React.FC<{
     pointerIdRef.current = null;
   };
 
-  const triggerDelete = (target: HTMLDivElement, lockedOffset: number) => {
-    if (hasTriggeredDeleteRef.current) return;
-    hasTriggeredDeleteRef.current = true;
-    releaseDeleteArmedRef.current = false;
+  const finishSwipe = (target: HTMLDivElement) => {
     releasePointer(target);
     setIsDragging(false);
     axisRef.current = null;
-    currentOffsetRef.current = lockedOffset;
-    setOffsetX(lockedOffset);
-    void Promise.resolve(onSwipeDelete())
-      .catch(() => false)
-      .finally(() => {
-        hasTriggeredDeleteRef.current = false;
-        currentOffsetRef.current = 0;
-        setOffsetX(0);
-      });
-  };
-
-  const finishSwipe = (target: HTMLDivElement, finalClientX?: number) => {
-    const deltaX = (finalClientX ?? lastXRef.current) - startXRef.current;
-    const effectiveOffset = Math.max(
-      SWIPE_DELETE_MAX_OFFSET,
-      Math.min(0, startOffsetRef.current + deltaX),
-    );
-    if (
-      !hasTriggeredDeleteRef.current &&
-      (
-        releaseDeleteArmedRef.current ||
-        effectiveOffset <= SWIPE_DELETE_TRIGGER_OFFSET ||
-        currentOffsetRef.current <= SWIPE_DELETE_TRIGGER_OFFSET
-      )
-    ) {
-      const lockedOffset = Math.min(effectiveOffset, SWIPE_DELETE_MAX_OFFSET);
-      triggerDelete(target, lockedOffset);
-      return;
-    }
-    releasePointer(target);
-    setIsDragging(false);
-    axisRef.current = null;
-    hasTriggeredDeleteRef.current = false;
-    releaseDeleteArmedRef.current = false;
-    currentOffsetRef.current = 0;
-    setOffsetX(0);
+    const nextOpen = currentOffsetRef.current <= SWIPE_OPEN_THRESHOLD;
+    const nextOffset = nextOpen ? SWIPE_REVEAL_OFFSET : 0;
+    onOpenChange(nextOpen);
+    currentOffsetRef.current = nextOffset;
+    setOffsetX(nextOffset);
   };
 
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (disabled) return;
     if (event.pointerType === "mouse" && event.button !== 0) return;
     pointerIdRef.current = event.pointerId;
     event.currentTarget.setPointerCapture(event.pointerId);
     axisRef.current = null;
-    hasTriggeredDeleteRef.current = false;
-    releaseDeleteArmedRef.current = false;
     startXRef.current = event.clientX;
     startYRef.current = event.clientY;
-    lastXRef.current = event.clientX;
-    startOffsetRef.current = offsetX;
+    startOffsetRef.current = isOpen ? SWIPE_REVEAL_OFFSET : offsetX;
     setIsDragging(true);
   };
 
   const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (!isDragging) return;
+    if (!isDragging || disabled) return;
 
     const deltaX = event.clientX - startXRef.current;
     const deltaY = event.clientY - startYRef.current;
 
     if (axisRef.current === null) {
       if (
-        Math.abs(deltaX) < SWIPE_DELETE_GESTURE_THRESHOLD &&
-        Math.abs(deltaY) < SWIPE_DELETE_GESTURE_THRESHOLD
+        Math.abs(deltaX) < SWIPE_GESTURE_THRESHOLD &&
+        Math.abs(deltaY) < SWIPE_GESTURE_THRESHOLD
       ) {
         return;
       }
@@ -1942,30 +1912,21 @@ const SwipeDeleteCard: React.FC<{
     if (axisRef.current !== "x") return;
 
     event.preventDefault();
-    lastXRef.current = event.clientX;
     const nextOffset = Math.max(
-      SWIPE_DELETE_MAX_OFFSET,
+      SWIPE_REVEAL_OFFSET,
       Math.min(0, startOffsetRef.current + deltaX),
     );
     currentOffsetRef.current = nextOffset;
     setOffsetX(nextOffset);
-    if (nextOffset <= SWIPE_DELETE_TRIGGER_OFFSET) {
-      releaseDeleteArmedRef.current = true;
-    }
-
-    if (deltaX <= SWIPE_DELETE_INSTANT_OFFSET) {
-      triggerDelete(event.currentTarget, nextOffset);
-      return;
-    }
   };
 
-  const reveal = Math.min(1, Math.abs(offsetX) / Math.abs(SWIPE_DELETE_MAX_OFFSET));
+  const reveal = Math.min(1, Math.abs(offsetX) / Math.abs(SWIPE_REVEAL_OFFSET));
   const backdropOpacity = Math.max(0, reveal - 0.03) * 1.1;
 
   return (
     <div className="relative overflow-hidden rounded-3xl" style={{ touchAction: "pan-y" }}>
       <div
-        className="absolute inset-0 flex items-center justify-end px-4"
+        className="absolute inset-0 flex items-center justify-end px-3"
         style={{
           opacity: backdropOpacity,
           background: "linear-gradient(90deg, rgba(255,69,58,0.08), rgba(255,69,58,0.36))",
@@ -1973,9 +1934,19 @@ const SwipeDeleteCard: React.FC<{
           boxShadow: `inset 0 0 24px rgba(255,69,58,${0.08 + reveal * 0.26})`,
         }}
       >
-        <div className="flex items-center gap-2 text-[#FFB4AF]">
+        <button
+          type="button"
+          onClick={() => {
+            if (disabled) return;
+            onOpenChange(false);
+            onRequestDelete();
+          }}
+          className="h-12 w-12 rounded-2xl border border-[#FF453A]/55 bg-[#FF453A]/22 text-[#FFB4AF] flex items-center justify-center"
+          aria-label="Usuń pomiar"
+          disabled={disabled}
+        >
           <Trash2 className="w-5 h-5" />
-        </div>
+        </button>
       </div>
 
       <div
@@ -1986,8 +1957,8 @@ const SwipeDeleteCard: React.FC<{
         }}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
-        onPointerUp={(event) => finishSwipe(event.currentTarget, event.clientX)}
-        onPointerCancel={(event) => finishSwipe(event.currentTarget, event.clientX)}
+        onPointerUp={(event) => finishSwipe(event.currentTarget)}
+        onPointerCancel={(event) => finishSwipe(event.currentTarget)}
       >
         {children}
       </div>
@@ -2356,6 +2327,7 @@ const BloodPressureApp: React.FC = () => {
   const [preferences, setPreferences] = useState<MeasurementPreferences>(defaultMeasurementPreferences);
   const [draftPreferences, setDraftPreferences] = useState<MeasurementPreferences>(preferences);
   const [pendingDeleteReadingId, setPendingDeleteReadingId] = useState<Id<"readings"> | null>(null);
+  const [openSwipeReadingId, setOpenSwipeReadingId] = useState<Id<"readings"> | null>(null);
   const [expandedHistoryReadingIds, setExpandedHistoryReadingIds] = useState<Set<Id<"readings">>>(() => new Set());
   const [isDeletingReading, setIsDeletingReading] = useState(false);
   const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
@@ -2798,6 +2770,7 @@ const BloodPressureApp: React.FC = () => {
     try {
       await deleteReadingMutation({ id });
       setPendingDeleteReadingId(null);
+      setOpenSwipeReadingId(null);
       setDataSyncError(null);
     } catch (error) {
       setDataSyncError(mapAppError(error, "Nie udało się usunąć pomiaru."));
@@ -2809,13 +2782,6 @@ const BloodPressureApp: React.FC = () => {
   const handleConfirmDeleteReading = async () => {
     if (!pendingDeleteReadingId) return;
     await handleDeleteReading(pendingDeleteReadingId);
-  };
-
-  const handleSwipeDeleteReading = async (id: Id<"readings">): Promise<boolean> => {
-    const confirmed = window.confirm("Czy na pewno chcesz usunąć ten pomiar?");
-    if (!confirmed) return false;
-    await handleDeleteReading(id);
-    return true;
   };
 
   const toggleHistoryReadingDetails = (readingId: Id<"readings">) => {
@@ -3320,7 +3286,10 @@ const BloodPressureApp: React.FC = () => {
                 <div className="grid grid-cols-2 gap-3">
                   <button
                     type="button"
-                    onClick={() => setPendingDeleteReadingId(null)}
+                    onClick={() => {
+                      setPendingDeleteReadingId(null);
+                      setOpenSwipeReadingId(null);
+                    }}
                     className="h-11 rounded-xl border border-white/10 bg-white/5 text-white/85 hover:bg-white/10 transition-colors"
                     disabled={isDeletingReading}
                   >
@@ -3725,7 +3694,22 @@ const BloodPressureApp: React.FC = () => {
                 const secondaryArmLabel = secondArm ? getArmLabel(secondArm.arm) : "";
 
                 return (
-                  <SwipeDeleteCard key={reading.id} onSwipeDelete={() => handleSwipeDeleteReading(reading.id)}>
+                  <SwipeDeleteCard
+                    key={reading.id}
+                    isOpen={openSwipeReadingId === reading.id}
+                    onOpenChange={(nextOpen) => {
+                      setOpenSwipeReadingId((prev) => {
+                        if (nextOpen) return reading.id;
+                        return prev === reading.id ? null : prev;
+                      });
+                    }}
+                    onRequestDelete={() => {
+                      if (isDeletingReading) return;
+                      setOpenSwipeReadingId(null);
+                      setPendingDeleteReadingId(reading.id);
+                    }}
+                    disabled={isDeletingReading || pendingDeleteReadingId !== null}
+                  >
                     <GlassCard className="relative">
                       <div className="min-w-0">
                         <div className="flex items-center justify-between gap-2 mb-2.5">
