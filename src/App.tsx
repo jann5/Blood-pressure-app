@@ -2896,9 +2896,7 @@ const BloodPressureApp: React.FC = () => {
               <div className="mb-4 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3">
                 <p className="text-white/55 text-xs mb-1">Pomiar podstawowy</p>
                 <p className="text-white text-base font-semibold">{getArmLabel(preferredMeasurementArm)}</p>
-                <p className="text-white/40 text-xs mt-1">
-                  Najczęściej zalecany pomiar na ręce niedominującej ({getHandednessLabel(dominantHand)}).
-                </p>
+                <p className="text-white/35 text-[11px] mt-1">{getArmLabel(preferredMeasurementArm)}</p>
               </div>
               <div className="flex justify-center gap-2 mb-6 w-full max-w-[320px] mx-auto">
                 <ScrollPicker value={systolic} onChange={setSystolic} min={60} max={250} label="SYS" />
