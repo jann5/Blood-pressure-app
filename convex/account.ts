@@ -10,6 +10,8 @@ import {
 } from "@convex-dev/auth/server";
 
 const normalizeEmail = (email: string) => email.trim().toLowerCase();
+const oppositeArm = (hand: "left" | "right"): "left" | "right" =>
+  hand === "left" ? "right" : "left";
 
 export const currentUserEmail = query({
   args: {},
@@ -149,6 +151,25 @@ export const deleteAccount = mutation({
     }
 
     await ctx.db.delete(userId);
+    return { success: true };
+  },
+});
+
+export const setDominantHand = mutation({
+  args: {
+    dominantHand: v.union(v.literal("left"), v.literal("right")),
+  },
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (!userId) {
+      throw new Error("Not authenticated");
+    }
+
+    await ctx.db.patch(userId, {
+      dominantHand: args.dominantHand,
+      preferredMeasurementArm: oppositeArm(args.dominantHand),
+    });
+
     return { success: true };
   },
 });

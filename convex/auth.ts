@@ -4,8 +4,12 @@ import { Password } from "@convex-dev/auth/providers/Password";
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 type VerificationPurpose = "verify-email" | "password-reset";
+type Handedness = "left" | "right";
 
 const normalizeEmail = (value: string): string => value.trim().toLowerCase();
+const normalizeHandedness = (value: unknown): Handedness | null =>
+  value === "left" || value === "right" ? value : null;
+const oppositeArm = (hand: Handedness): Handedness => (hand === "left" ? "right" : "left");
 
 const validateEmail = (rawEmail: string): string => {
   const email = normalizeEmail(rawEmail);
@@ -72,10 +76,22 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
 
         const email = validateEmail(params.email);
         const rawName = typeof params.name === "string" ? params.name.trim() : "";
+        const isSignUpFlow = params.flow === "signUp";
+        const dominantHand = normalizeHandedness(params.dominantHand);
+
+        if (isSignUpFlow && dominantHand === null) {
+          throw new Error("Wybierz czy jesteś lewo- czy praworęczny.");
+        }
 
         return {
           email,
           name: rawName || email.split("@")[0] || "Użytkownik",
+          ...(dominantHand
+            ? {
+                dominantHand,
+                preferredMeasurementArm: oppositeArm(dominantHand),
+              }
+            : {}),
         };
       },
     }),

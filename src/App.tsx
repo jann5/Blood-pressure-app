@@ -52,14 +52,25 @@ type TimeRange = "7d" | "30d" | "3m" | "all";
 type SettingsSectionKey = "pulse" | "pressure";
 type AuthView = "login" | "signup";
 type PasswordResetStep = "idle" | "request" | "verify";
+type Handedness = "left" | "right";
+type ArmSide = "left" | "right";
 
 import type { Id } from "../convex/_generated/dataModel";
+
+interface SecondArmReading {
+  arm: ArmSide;
+  systolic: number;
+  diastolic: number;
+  pulse: number;
+}
 
 interface BloodPressureReading {
   id: Id<"readings">;
   systolic: number;
   diastolic: number;
   pulse: number;
+  arm: ArmSide;
+  secondArm?: SecondArmReading;
   timestamp: Date;
   note?: string;
 }
@@ -211,6 +222,14 @@ const getPulseCategoryColor = (category: PulseCategory): string => {
 
   return colors[category];
 };
+
+const oppositeArm = (arm: ArmSide): ArmSide => (arm === "left" ? "right" : "left");
+const getPreferredArmFromHandedness = (dominantHand: Handedness): ArmSide => oppositeArm(dominantHand);
+const getHandednessLabel = (hand: Handedness): string =>
+  hand === "left" ? "Leworęczny / leworęczna" : "Praworęczny / praworęczna";
+const getArmLabel = (arm: ArmSide): string => (arm === "left" ? "Lewa ręka" : "Prawa ręka");
+const normalizeArmSide = (value: unknown, fallback: ArmSide): ArmSide =>
+  value === "left" || value === "right" ? value : fallback;
 
 const getCategoryStyles = (category: PressureCategory) => {
   const styles = {
@@ -577,6 +596,7 @@ const AuthScreen: React.FC<{
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [verificationCode, setVerificationCode] = useState("");
+  const [dominantHand, setDominantHand] = useState<Handedness>("right");
   const [awaitsEmailVerification, setAwaitsEmailVerification] = useState(false);
   const [passwordResetStep, setPasswordResetStep] = useState<PasswordResetStep>("idle");
   const [passwordResetCode, setPasswordResetCode] = useState("");
@@ -609,6 +629,9 @@ const AuthScreen: React.FC<{
     }
     if (lower.includes("password reset is not enabled")) {
       return "Odzyskiwanie hasła jest chwilowo niedostępne.";
+    }
+    if (lower.includes("wybierz czy jesteś lewo") || lower.includes("choose whether you are left")) {
+      return "Wybierz czy jesteś lewo- czy praworęczny.";
     }
     if (lower.includes("invalid email") || lower.includes("podaj poprawny adres")) {
       return "Podaj poprawny adres e-mail.";
@@ -719,6 +742,9 @@ const AuthScreen: React.FC<{
       formData.append("flow", view === "signup" ? "signUp" : "signIn");
       if (view === "signup" && name.trim()) {
         formData.append("name", name.trim());
+      }
+      if (view === "signup") {
+        formData.append("dominantHand", dominantHand);
       }
 
       const result = await signIn("password", formData);
@@ -964,6 +990,35 @@ const AuthScreen: React.FC<{
                     className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF]"
                     placeholder="Twoje imię"
                   />
+                </div>
+              )}
+
+              {view === "signup" && (
+                <div>
+                  <Label className="text-white/55 text-sm mb-2 block">Ręka dominująca</Label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {(["right", "left"] as Handedness[]).map((hand) => {
+                      const isSelected = dominantHand === hand;
+                      return (
+                        <button
+                          key={hand}
+                          type="button"
+                          onClick={() => setDominantHand(hand)}
+                          className="h-11 rounded-xl border text-sm font-medium transition-colors"
+                          style={{
+                            borderColor: isSelected ? "rgba(10,132,255,0.75)" : "rgba(255,255,255,0.12)",
+                            background: isSelected ? "rgba(10,132,255,0.22)" : "rgba(255,255,255,0.04)",
+                            color: isSelected ? "#BFDFFF" : "rgba(255,255,255,0.78)",
+                          }}
+                        >
+                          {hand === "right" ? "Praworęczny/a" : "Leworęczny/a"}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="text-white/40 text-xs mt-2">
+                    Domyślna ręka pomiarowa: {getArmLabel(getPreferredArmFromHandedness(dominantHand))}
+                  </p>
                 </div>
               )}
 
@@ -1886,11 +1941,17 @@ const BloodPressureApp: React.FC = () => {
   const [systolic, setSystolic] = useState(120);
   const [diastolic, setDiastolic] = useState(80);
   const [pulse, setPulse] = useState(72);
+  const [enableSecondArm, setEnableSecondArm] = useState(false);
+  const [secondArmSystolic, setSecondArmSystolic] = useState(120);
+  const [secondArmDiastolic, setSecondArmDiastolic] = useState(80);
+  const [secondArmPulse, setSecondArmPulse] = useState(72);
   const [readingDate, setReadingDate] = useState(new Date());
   const [note, setNote] = useState("");
 
   const [timeRange, setTimeRange] = useState<TimeRange>("7d");
   const [showSettings, setShowSettings] = useState(false);
+  const [dominantHand, setDominantHand] = useState<Handedness>("right");
+  const [draftDominantHand, setDraftDominantHand] = useState<Handedness>("right");
   const [settingsSections, setSettingsSections] = useState<Record<SettingsSectionKey, boolean>>({
     pulse: false,
     pressure: false,
@@ -1916,6 +1977,7 @@ const BloodPressureApp: React.FC = () => {
   const addReadingMutation = useMutation(api.readings.add);
   const deleteReadingMutation = useMutation(api.readings.remove);
   const savePreferencesMutation = useMutation(api.preferences.save);
+  const setDominantHandMutation = useMutation(api.account.setDominantHand);
   const deleteAccountMutation = useMutation(api.account.deleteAccount);
   const changePasswordAction = useAction(api.account.changePassword);
 
@@ -1925,6 +1987,8 @@ const BloodPressureApp: React.FC = () => {
     { label: "Historia", icon: Clock },
     { label: "Analiza", icon: TrendingUp },
   ];
+  const preferredMeasurementArm = getPreferredArmFromHandedness(dominantHand);
+  const secondaryMeasurementArm = oppositeArm(preferredMeasurementArm);
 
   const tabToIndex: Record<AppTab, number> = {
     dashboard: 0,
@@ -1946,12 +2010,13 @@ const BloodPressureApp: React.FC = () => {
   useEffect(() => {
     if (showSettings) {
       setDraftPreferences(preferences);
+      setDraftDominantHand(dominantHand);
       setSettingsSections({
         pulse: false,
         pressure: false,
       });
     }
-  }, [showSettings, preferences]);
+  }, [showSettings, preferences, dominantHand]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -2013,6 +2078,10 @@ const BloodPressureApp: React.FC = () => {
     const normalized = normalizeMeasurementPreferences(draftPreferences);
 
     try {
+      if (draftDominantHand !== dominantHand) {
+        await setDominantHandMutation({ dominantHand: draftDominantHand });
+        setDominantHand(draftDominantHand);
+      }
       await savePreferencesMutation({ preferences: normalized });
       setPreferences(normalized);
       setShowSettings(false);
@@ -2028,6 +2097,10 @@ const BloodPressureApp: React.FC = () => {
     setDraftPreferences(normalized);
     setShowSettings(false);
     try {
+      if (draftDominantHand !== dominantHand) {
+        await setDominantHandMutation({ dominantHand: draftDominantHand });
+        setDominantHand(draftDominantHand);
+      }
       await savePreferencesMutation({ preferences: normalized });
       setDataSyncError(null);
     } catch (error) {
@@ -2074,6 +2147,15 @@ const BloodPressureApp: React.FC = () => {
         systolic,
         diastolic,
         pulse,
+        arm: preferredMeasurementArm,
+        secondArm: enableSecondArm
+          ? {
+              arm: secondaryMeasurementArm,
+              systolic: secondArmSystolic,
+              diastolic: secondArmDiastolic,
+              pulse: secondArmPulse,
+            }
+          : undefined,
         timestamp: readingDate.toISOString(),
         note: note.trim() || undefined,
       });
@@ -2088,6 +2170,10 @@ const BloodPressureApp: React.FC = () => {
         setSystolic(120);
         setDiastolic(80);
         setPulse(72);
+        setEnableSecondArm(false);
+        setSecondArmSystolic(120);
+        setSecondArmDiastolic(80);
+        setSecondArmPulse(72);
         setReadingDate(new Date());
       }, 1500);
     } catch (error) {
@@ -2198,16 +2284,37 @@ const BloodPressureApp: React.FC = () => {
           systolic: Math.round(systolicValue),
           diastolic: Math.round(diastolicValue),
           pulse: Math.round(pulseValue),
+          arm: normalizeArmSide(r.arm, preferredMeasurementArm),
+          secondArm:
+            r.secondArm &&
+            typeof r.secondArm === "object" &&
+            toFiniteNumber((r.secondArm as Record<string, unknown>).systolic) !== null &&
+            toFiniteNumber((r.secondArm as Record<string, unknown>).diastolic) !== null &&
+            toFiniteNumber((r.secondArm as Record<string, unknown>).pulse) !== null
+              ? {
+                  arm: normalizeArmSide(
+                    (r.secondArm as Record<string, unknown>).arm,
+                    oppositeArm(normalizeArmSide(r.arm, preferredMeasurementArm)),
+                  ),
+                  systolic: Math.round(toFiniteNumber((r.secondArm as Record<string, unknown>).systolic)!),
+                  diastolic: Math.round(toFiniteNumber((r.secondArm as Record<string, unknown>).diastolic)!),
+                  pulse: Math.round(toFiniteNumber((r.secondArm as Record<string, unknown>).pulse)!),
+                }
+              : undefined,
           timestamp,
           note: typeof r.note === "string" ? r.note : undefined,
         };
       })
       .filter((reading): reading is BloodPressureReading => reading !== null)
       .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
-  }, [userData?.readings]);
+  }, [userData?.readings, preferredMeasurementArm]);
 
   // Load preferences from user data
   useEffect(() => {
+    const nextDominant = normalizeArmSide(userData?.dominantHand, "right");
+    setDominantHand(nextDominant);
+    setDraftDominantHand(nextDominant);
+
     if (userData?.preferences) {
       const prefs = normalizeMeasurementPreferences({
         pressure: userData.preferences.pressure as PressurePreferences,
@@ -2216,7 +2323,7 @@ const BloodPressureApp: React.FC = () => {
       setPreferences(prefs);
       setDraftPreferences(prefs);
     }
-  }, [userData?.preferences]);
+  }, [userData?.preferences, userData?.dominantHand]);
 
   const filteredReadings = useMemo(() => {
     const rangeStart = getRangeStart(timeRange, new Date());
@@ -2385,6 +2492,36 @@ const BloodPressureApp: React.FC = () => {
                     <p className="text-white text-sm font-semibold mb-1">{userData?.name}</p>
                     <p className="text-white/50 text-xs">{userData?.email}</p>
                   </div>
+
+                  <section className="rounded-2xl border border-white/10 bg-white/[0.02] p-4 space-y-3">
+                    <div>
+                      <p className="text-white text-lg font-semibold leading-tight">Ręka dominująca</p>
+                      <p className="text-white/45 text-xs mt-1">Domyślna ręka pomiaru to ręka niedominująca</p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      {(["right", "left"] as Handedness[]).map((hand) => {
+                        const isSelected = draftDominantHand === hand;
+                        return (
+                          <button
+                            key={hand}
+                            type="button"
+                            onClick={() => setDraftDominantHand(hand)}
+                            className="h-11 rounded-xl border text-sm font-medium transition-colors"
+                            style={{
+                              borderColor: isSelected ? "rgba(10,132,255,0.75)" : "rgba(255,255,255,0.12)",
+                              background: isSelected ? "rgba(10,132,255,0.22)" : "rgba(255,255,255,0.04)",
+                              color: isSelected ? "#BFDFFF" : "rgba(255,255,255,0.78)",
+                            }}
+                          >
+                            {hand === "right" ? "Praworęczny/a" : "Leworęczny/a"}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="text-white/45 text-xs">
+                      Domyślna ręka pomiarowa: {getArmLabel(getPreferredArmFromHandedness(draftDominantHand))}
+                    </p>
+                  </section>
 
                   <SettingsSection
                     title="Progi ciśnienia"
@@ -2729,6 +2866,12 @@ const BloodPressureApp: React.FC = () => {
                           {getPulseCategoryLabel(latestPulseCategory)}
                         </p>
                       )}
+                      {readings[0]?.secondArm && (
+                        <p className="text-white/55 text-center text-sm mb-3">
+                          {getArmLabel(readings[0].secondArm.arm)}: {formatValueOrDash(readings[0].secondArm.systolic)}/
+                          {formatValueOrDash(readings[0].secondArm.diastolic)} • {formatValueOrDash(readings[0].secondArm.pulse)} bpm
+                        </p>
+                      )}
 
                       <div className="flex justify-center mb-3">
                         <CategoryBadge category={getPressureCategory(readings[0].systolic, readings[0].diastolic)} />
@@ -2750,11 +2893,45 @@ const BloodPressureApp: React.FC = () => {
           <div className="p-6 space-y-6">
             <GlassCard>
               <h2 className="text-white text-2xl font-bold mb-6 text-center">Nowy pomiar</h2>
+              <div className="mb-4 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3">
+                <p className="text-white/55 text-xs mb-1">Pomiar podstawowy</p>
+                <p className="text-white text-base font-semibold">{getArmLabel(preferredMeasurementArm)}</p>
+                <p className="text-white/40 text-xs mt-1">
+                  Najczęściej zalecany pomiar na ręce niedominującej ({getHandednessLabel(dominantHand)}).
+                </p>
+              </div>
               <div className="flex justify-center gap-2 mb-6 w-full max-w-[320px] mx-auto">
                 <ScrollPicker value={systolic} onChange={setSystolic} min={60} max={250} label="SYS" />
                 <ScrollPicker value={diastolic} onChange={setDiastolic} min={40} max={150} label="DIA" />
                 <ScrollPicker value={pulse} onChange={setPulse} min={30} max={200} label="PULS" />
               </div>
+
+              <button
+                type="button"
+                onClick={() => setEnableSecondArm((prev) => !prev)}
+                className="w-full h-11 rounded-xl border text-sm font-medium transition-colors"
+                style={{
+                  borderColor: enableSecondArm ? "rgba(10,132,255,0.75)" : "rgba(255,255,255,0.12)",
+                  background: enableSecondArm ? "rgba(10,132,255,0.22)" : "rgba(255,255,255,0.04)",
+                  color: enableSecondArm ? "#BFDFFF" : "rgba(255,255,255,0.78)",
+                }}
+              >
+                {enableSecondArm ? "Usuń drugi pomiar ręki" : "Dodaj pomiar drugiej ręki (opcjonalnie)"}
+              </button>
+
+              {enableSecondArm && (
+                <div className="mt-5">
+                  <div className="mb-4 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3">
+                    <p className="text-white/55 text-xs mb-1">Pomiar dodatkowy</p>
+                    <p className="text-white text-base font-semibold">{getArmLabel(secondaryMeasurementArm)}</p>
+                  </div>
+                  <div className="flex justify-center gap-2 w-full max-w-[320px] mx-auto">
+                    <ScrollPicker value={secondArmSystolic} onChange={setSecondArmSystolic} min={60} max={250} label="SYS" />
+                    <ScrollPicker value={secondArmDiastolic} onChange={setSecondArmDiastolic} min={40} max={150} label="DIA" />
+                    <ScrollPicker value={secondArmPulse} onChange={setSecondArmPulse} min={30} max={200} label="PULS" />
+                  </div>
+                </div>
+              )}
             </GlassCard>
 
             <GlassCard>
@@ -2830,6 +3007,13 @@ const BloodPressureApp: React.FC = () => {
                       >
                         {getPulseCategoryLabel(getPulseCategory(reading.pulse))}
                       </p>
+                      <p className="text-white/40 text-xs mb-1">Ręka główna: {getArmLabel(reading.arm)}</p>
+                      {reading.secondArm && (
+                        <p className="text-white/45 text-xs mb-1">
+                          Druga ręka ({getArmLabel(reading.secondArm.arm)}): {formatValueOrDash(reading.secondArm.systolic)}/
+                          {formatValueOrDash(reading.secondArm.diastolic)} • {formatValueOrDash(reading.secondArm.pulse)} bpm
+                        </p>
+                      )}
 
                       {reading.note && <p className="text-white/30 text-sm italic mt-2">{reading.note}</p>}
                     </div>

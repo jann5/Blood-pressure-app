@@ -2,14 +2,38 @@ import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 import { authTables } from "@convex-dev/auth/server";
 
+const armSideValidator = v.union(v.literal("left"), v.literal("right"));
+const authTablesWithoutUsers = (({ users: _users, ...rest }) => rest)(authTables);
+
 export default defineSchema({
-  ...authTables,
+  ...authTablesWithoutUsers,
+
+  users: defineTable({
+    name: v.optional(v.string()),
+    image: v.optional(v.string()),
+    email: v.optional(v.string()),
+    emailVerificationTime: v.optional(v.number()),
+    phone: v.optional(v.string()),
+    phoneVerificationTime: v.optional(v.number()),
+    isAnonymous: v.optional(v.boolean()),
+    dominantHand: v.optional(armSideValidator),
+    preferredMeasurementArm: v.optional(armSideValidator),
+  })
+    .index("email", ["email"])
+    .index("phone", ["phone"]),
   
   readings: defineTable({
     userId: v.string(),
     systolic: v.number(),
     diastolic: v.number(),
     pulse: v.number(),
+    arm: v.optional(armSideValidator),
+    secondArm: v.optional(v.object({
+      arm: armSideValidator,
+      systolic: v.number(),
+      diastolic: v.number(),
+      pulse: v.number(),
+    })),
     timestamp: v.string(),
     note: v.optional(v.string()),
   })

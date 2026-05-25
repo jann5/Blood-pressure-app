@@ -2,6 +2,8 @@ import { v } from "convex/values";
 import { query, mutation } from "./_generated/server";
 import { getAuthUserId } from "@convex-dev/auth/server";
 
+const armSideValidator = v.union(v.literal("left"), v.literal("right"));
+
 export const list = query({
   args: {},
   handler: async (ctx) => {
@@ -25,6 +27,13 @@ export const add = mutation({
     systolic: v.number(),
     diastolic: v.number(),
     pulse: v.number(),
+    arm: v.optional(armSideValidator),
+    secondArm: v.optional(v.object({
+      arm: armSideValidator,
+      systolic: v.number(),
+      diastolic: v.number(),
+      pulse: v.number(),
+    })),
     timestamp: v.string(),
     note: v.optional(v.string()),
   },
@@ -39,6 +48,8 @@ export const add = mutation({
       systolic: args.systolic,
       diastolic: args.diastolic,
       pulse: args.pulse,
+      arm: args.arm,
+      secondArm: args.secondArm,
       timestamp: args.timestamp,
       note: args.note,
     });

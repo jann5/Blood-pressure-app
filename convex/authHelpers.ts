@@ -32,6 +32,8 @@ export const getUser = query({
       _id: user._id,
       email: user.email,
       name: user.name || "Użytkownik",
+      dominantHand: user.dominantHand,
+      preferredMeasurementArm: user.preferredMeasurementArm,
       loginCount: 1,
       readings,
       preferences,
