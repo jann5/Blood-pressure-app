@@ -1959,6 +1959,7 @@ const BloodPressureApp: React.FC = () => {
   const [preferences, setPreferences] = useState<MeasurementPreferences>(defaultMeasurementPreferences);
   const [draftPreferences, setDraftPreferences] = useState<MeasurementPreferences>(preferences);
   const [pendingDeleteReadingId, setPendingDeleteReadingId] = useState<Id<"readings"> | null>(null);
+  const [expandedHistoryReadingIds, setExpandedHistoryReadingIds] = useState<Set<Id<"readings">>>(() => new Set());
   const [isDeletingReading, setIsDeletingReading] = useState(false);
   const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
   const [currentPasswordInput, setCurrentPasswordInput] = useState("");
@@ -2197,6 +2198,18 @@ const BloodPressureApp: React.FC = () => {
   const handleConfirmDeleteReading = async () => {
     if (!pendingDeleteReadingId) return;
     await handleDeleteReading(pendingDeleteReadingId);
+  };
+
+  const toggleHistoryReadingDetails = (readingId: Id<"readings">) => {
+    setExpandedHistoryReadingIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(readingId)) {
+        next.delete(readingId);
+      } else {
+        next.add(readingId);
+      }
+      return next;
+    });
   };
 
   const handleChangePassword = async () => {
@@ -2893,11 +2906,7 @@ const BloodPressureApp: React.FC = () => {
           <div className="p-6 space-y-6">
             <GlassCard>
               <h2 className="text-white text-2xl font-bold mb-6 text-center">Nowy pomiar</h2>
-              <div className="mb-4 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3">
-                <p className="text-white/55 text-xs mb-1">Pomiar podstawowy</p>
-                <p className="text-white text-base font-semibold">{getArmLabel(preferredMeasurementArm)}</p>
-                <p className="text-white/35 text-[11px] mt-1">{getArmLabel(preferredMeasurementArm)}</p>
-              </div>
+              <p className="mb-4 text-center text-xs text-white/35">{getArmLabel(preferredMeasurementArm)}</p>
               <div className="flex justify-center gap-2 mb-6 w-full max-w-[320px] mx-auto">
                 <ScrollPicker value={systolic} onChange={setSystolic} min={60} max={250} label="SYS" />
                 <ScrollPicker value={diastolic} onChange={setDiastolic} min={40} max={150} label="DIA" />
@@ -2919,10 +2928,7 @@ const BloodPressureApp: React.FC = () => {
 
               {enableSecondArm && (
                 <div className="mt-5">
-                  <div className="mb-4 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3">
-                    <p className="text-white/55 text-xs mb-1">Pomiar dodatkowy</p>
-                    <p className="text-white text-base font-semibold">{getArmLabel(secondaryMeasurementArm)}</p>
-                  </div>
+                  <p className="mb-4 text-center text-xs text-white/35">{getArmLabel(secondaryMeasurementArm)}</p>
                   <div className="flex justify-center gap-2 w-full max-w-[320px] mx-auto">
                     <ScrollPicker value={secondArmSystolic} onChange={setSecondArmSystolic} min={60} max={250} label="SYS" />
                     <ScrollPicker value={secondArmDiastolic} onChange={setSecondArmDiastolic} min={40} max={150} label="DIA" />
@@ -2983,51 +2989,100 @@ const BloodPressureApp: React.FC = () => {
                 </div>
               </GlassCard>
             ) : (
-              readings.map((reading) => (
-                <GlassCard key={reading.id} className="relative">
-                  <div className="flex items-center justify-between">
-                    <div className="flex-1">
-                      <p className="text-white/55 text-sm mb-2">{formatTime(reading.timestamp)}</p>
-                      <div className="flex items-center gap-2 mb-2">
-                        <span className="text-white text-3xl font-bold tabular-nums">
-                          {formatValueOrDash(reading.systolic)}/{formatValueOrDash(reading.diastolic)}
-                        </span>
-                        <span
-                          className="text-lg whitespace-nowrap tabular-nums"
-                          style={{ color: getPulseCategoryColor(getPulseCategory(reading.pulse)) }}
-                        >
-                          • {formatValueOrDash(reading.pulse)} bpm
-                        </span>
-                      </div>
-                      <p
-                        className="text-xs mb-2"
-                        style={{ color: getPulseCategoryColor(getPulseCategory(reading.pulse)) }}
-                      >
-                        {getPulseCategoryLabel(getPulseCategory(reading.pulse))}
-                      </p>
-                      <p className="text-white/40 text-xs mb-1">Ręka główna: {getArmLabel(reading.arm)}</p>
-                      {reading.secondArm && (
-                        <p className="text-white/45 text-xs mb-1">
-                          Druga ręka ({getArmLabel(reading.secondArm.arm)}): {formatValueOrDash(reading.secondArm.systolic)}/
-                          {formatValueOrDash(reading.secondArm.diastolic)} • {formatValueOrDash(reading.secondArm.pulse)} bpm
+              readings.map((reading) => {
+                const secondArm = reading.secondArm;
+                const hasSecondArm = Boolean(secondArm);
+                const displaySystolic = secondArm
+                  ? Math.round((reading.systolic + secondArm.systolic) / 2)
+                  : reading.systolic;
+                const displayDiastolic = secondArm
+                  ? Math.round((reading.diastolic + secondArm.diastolic) / 2)
+                  : reading.diastolic;
+                const displayPulse = secondArm
+                  ? Math.round((reading.pulse + secondArm.pulse) / 2)
+                  : reading.pulse;
+                const displayPulseCategory = getPulseCategory(displayPulse);
+                const isExpanded = expandedHistoryReadingIds.has(reading.id);
+
+                return (
+                  <GlassCard key={reading.id} className="relative">
+                    <div className="flex items-center justify-between">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2 mb-2">
+                          <p className="text-white/55 text-sm">{formatTime(reading.timestamp)}</p>
+                          {hasSecondArm && (
+                            <span className="rounded-full border border-white/15 bg-white/[0.05] px-2 py-0.5 text-[10px] text-white/65 tracking-wide uppercase">
+                              Pomiar 2 rąk
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 mb-2">
+                          <span className="text-white text-3xl font-bold tabular-nums">
+                            {formatValueOrDash(displaySystolic)}/{formatValueOrDash(displayDiastolic)}
+                          </span>
+                          <span
+                            className="text-lg whitespace-nowrap tabular-nums"
+                            style={{ color: getPulseCategoryColor(displayPulseCategory) }}
+                          >
+                            • {formatValueOrDash(displayPulse)} bpm
+                          </span>
+                        </div>
+                        <p className="text-xs mb-2" style={{ color: getPulseCategoryColor(displayPulseCategory) }}>
+                          {getPulseCategoryLabel(displayPulseCategory)}
                         </p>
-                      )}
 
-                      {reading.note && <p className="text-white/30 text-sm italic mt-2">{reading.note}</p>}
-                    </div>
+                        {secondArm ? (
+                          <>
+                            <div className="mb-1 flex items-center justify-between gap-2">
+                              <p className="text-white/40 text-xs">
+                                {getArmLabel(reading.arm)} + {getArmLabel(secondArm.arm)}
+                              </p>
+                              <button
+                                type="button"
+                                onClick={() => toggleHistoryReadingDetails(reading.id)}
+                                className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-[#7AB8FF] hover:bg-white/[0.06] transition-colors"
+                                aria-expanded={isExpanded}
+                              >
+                                {isExpanded ? "Ukryj" : "Szczegóły"}
+                                <ChevronDown
+                                  className={`h-3.5 w-3.5 transition-transform duration-200 ${isExpanded ? "rotate-180" : ""}`}
+                                />
+                              </button>
+                            </div>
 
-                    <div className="flex flex-col items-end gap-2">
-                      <CategoryBadge category={getPressureCategory(reading.systolic, reading.diastolic)} />
-                      <button
-                        onClick={() => setPendingDeleteReadingId(reading.id)}
-                        className="p-2 rounded-lg hover:bg-white/10 transition-colors"
-                      >
-                        <Trash2 className="w-5 h-5 text-white/55" />
-                      </button>
+                            {isExpanded && (
+                              <div className="space-y-1 mb-1">
+                                <p className="text-white/45 text-xs">
+                                  {getArmLabel(reading.arm)}: {formatValueOrDash(reading.systolic)}/
+                                  {formatValueOrDash(reading.diastolic)} • {formatValueOrDash(reading.pulse)} bpm
+                                </p>
+                                <p className="text-white/45 text-xs">
+                                  {getArmLabel(secondArm.arm)}: {formatValueOrDash(secondArm.systolic)}/
+                                  {formatValueOrDash(secondArm.diastolic)} • {formatValueOrDash(secondArm.pulse)} bpm
+                                </p>
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <p className="text-white/40 text-xs mb-1">Ręka: {getArmLabel(reading.arm)}</p>
+                        )}
+
+                        {reading.note && <p className="text-white/30 text-sm italic mt-2">{reading.note}</p>}
+                      </div>
+
+                      <div className="flex flex-col items-end gap-2">
+                        <CategoryBadge category={getPressureCategory(displaySystolic, displayDiastolic)} />
+                        <button
+                          onClick={() => setPendingDeleteReadingId(reading.id)}
+                          className="p-2 rounded-lg hover:bg-white/10 transition-colors"
+                        >
+                          <Trash2 className="w-5 h-5 text-white/55" />
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                </GlassCard>
-              ))
+                  </GlassCard>
+                );
+              })
             )}
           </div>
         )}
