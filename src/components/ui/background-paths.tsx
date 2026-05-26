@@ -16,7 +16,8 @@ function FloatingPaths({ position }: { position: number }) {
   return (
     <div className="absolute inset-0 pointer-events-none opacity-30">
       <svg
-        className="w-full h-full text-white"
+        className="w-full h-full"
+        style={{ color: "var(--theme-path-color, rgba(152,185,255,0.9))" }}
         viewBox="0 0 696 316"
         fill="none"
         preserveAspectRatio="xMidYMid slice"

@@ -3,6 +3,13 @@ import { v } from "convex/values";
 import { authTables } from "@convex-dev/auth/server";
 
 const armSideValidator = v.union(v.literal("left"), v.literal("right"));
+const appThemeValidator = v.union(
+  v.literal("midnight"),
+  v.literal("sand"),
+  v.literal("blush"),
+  v.literal("sage"),
+  v.literal("ocean"),
+);
 const authTablesWithoutUsers = (({ users: _users, ...rest }) => rest)(authTables);
 
 export default defineSchema({
@@ -42,6 +49,7 @@ export default defineSchema({
 
   preferences: defineTable({
     userId: v.string(),
+    theme: v.optional(appThemeValidator),
     pressure: v.object({
       lowSys: v.number(),
       lowDia: v.number(),

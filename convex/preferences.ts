@@ -24,6 +24,14 @@ const preferencesValidator = v.object({
   pulse: pulseValidator,
 });
 
+const themeValidator = v.union(
+  v.literal("midnight"),
+  v.literal("sand"),
+  v.literal("blush"),
+  v.literal("sage"),
+  v.literal("ocean"),
+);
+
 export const get = query({
   args: {},
   handler: async (ctx) => {
@@ -44,6 +52,7 @@ export const get = query({
 export const save = mutation({
   args: {
     preferences: preferencesValidator,
+    theme: v.optional(themeValidator),
   },
   handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
@@ -57,15 +66,34 @@ export const save = mutation({
       .unique();
 
     if (existing) {
-      await ctx.db.patch(existing._id, {
+      const patchPayload: {
+        pressure: typeof args.preferences.pressure;
+        pulse: typeof args.preferences.pulse;
+        theme?: typeof args.theme;
+      } = {
         pressure: args.preferences.pressure,
         pulse: args.preferences.pulse,
-      });
+      };
+      if (args.theme) {
+        patchPayload.theme = args.theme;
+      }
+      await ctx.db.patch(existing._id, patchPayload);
     } else {
-      await ctx.db.insert("preferences", {
+      const insertPayload: {
+        userId: string;
+        pressure: typeof args.preferences.pressure;
+        pulse: typeof args.preferences.pulse;
+        theme?: typeof args.theme;
+      } = {
         userId: userId as unknown as string,
         pressure: args.preferences.pressure,
         pulse: args.preferences.pulse,
+      };
+      if (args.theme) {
+        insertPayload.theme = args.theme;
+      }
+      await ctx.db.insert("preferences", {
+        ...insertPayload,
       });
     }
 

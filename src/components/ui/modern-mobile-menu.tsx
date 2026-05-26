@@ -14,7 +14,7 @@ export interface InteractiveMenuProps {
   onItemClick?: (index: number) => void;
 }
 
-const defaultAccentColor = "#0A84FF";
+const defaultAccentColor = "var(--theme-accent, #0A84FF)";
 
 const InteractiveMenu: React.FC<InteractiveMenuProps> = ({
   items = [],

@@ -4,16 +4,16 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
 const liquidButtonVariants = cva(
-  "inline-flex items-center justify-center cursor-pointer gap-2 whitespace-nowrap rounded-2xl text-lg font-semibold transition-[color,box-shadow,transform] disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-5 shrink-0 [&_svg]:shrink-0 outline-none focus-visible:ring-2 focus-visible:ring-[#0A84FF]/50",
+  "inline-flex items-center justify-center cursor-pointer gap-2 whitespace-nowrap rounded-2xl text-lg font-semibold transition-[color,box-shadow,transform] disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-5 shrink-0 [&_svg]:shrink-0 outline-none focus-visible:ring-2 focus-visible:ring-white/35",
   {
     variants: {
       variant: {
         default:
-          "bg-[#0A84FF] text-white hover:scale-[1.02] active:scale-[0.98] duration-200",
+          "hover:scale-[1.02] active:scale-[0.98] duration-200",
         glass:
           "bg-transparent hover:bg-white/5 text-white border border-white/10 backdrop-blur-md",
         success:
-          "bg-[#30D158] text-white hover:scale-[1.02] active:scale-[0.98] duration-200",
+          "hover:scale-[1.02] active:scale-[0.98] duration-200",
       },
       size: {
         default: "h-14 px-6 py-3",
@@ -41,17 +41,28 @@ function LiquidButton({
     asChild?: boolean;
   }) {
   const Comp = asChild ? Slot : "button";
+  const variantStyle: React.CSSProperties | undefined =
+    variant === "default"
+      ? {
+          background: "var(--theme-accent)",
+          color: "var(--theme-on-accent, #FFFFFF)",
+          boxShadow:
+            "0 0 6px rgba(0,0,0,0.03), 0 2px 8px rgba(0,0,0,0.16), inset 3px 3px 0.5px -3px rgba(0,0,0,0.9), inset -3px -3px 0.5px -3px rgba(0,0,0,0.85), inset 1px 1px 1px -0.5px rgba(0,0,0,0.6), inset -1px -1px 1px -0.5px rgba(0,0,0,0.6), inset 0 0 6px 6px rgba(0,0,0,0.12), inset 0 0 2px 2px rgba(0,0,0,0.06), 0 0 10px var(--theme-accent-soft)",
+        }
+      : variant === "success"
+        ? {
+            background: "var(--theme-success)",
+            color: "var(--theme-on-accent, #FFFFFF)",
+            boxShadow:
+              "0 0 6px rgba(0,0,0,0.03), 0 2px 8px rgba(0,0,0,0.16), inset 3px 3px 0.5px -3px rgba(0,0,0,0.9), inset -3px -3px 0.5px -3px rgba(0,0,0,0.85), inset 1px 1px 1px -0.5px rgba(0,0,0,0.6), inset -1px -1px 1px -0.5px rgba(0,0,0,0.6), inset 0 0 6px 6px rgba(0,0,0,0.12), inset 0 0 2px 2px rgba(0,0,0,0.06), 0 0 10px var(--theme-success-soft)",
+          }
+        : undefined;
 
   return (
     <Comp
       data-slot="button"
       className={cn("relative", liquidButtonVariants({ variant, size, className }))}
-      style={{
-        boxShadow:
-          variant === "default"
-            ? "0 0 6px rgba(0,0,0,0.03), 0 2px 6px rgba(0,0,0,0.08), inset 3px 3px 0.5px -3px rgba(0,0,0,0.9), inset -3px -3px 0.5px -3px rgba(0,0,0,0.85), inset 1px 1px 1px -0.5px rgba(0,0,0,0.6), inset -1px -1px 1px -0.5px rgba(0,0,0,0.6), inset 0 0 6px 6px rgba(0,0,0,0.12), inset 0 0 2px 2px rgba(0,0,0,0.06), 0 0 12px rgba(255,255,255,0.15)"
-            : undefined,
-      }}
+      style={variantStyle}
       {...props}
     >
       <div className="pointer-events-none z-10">{children}</div>

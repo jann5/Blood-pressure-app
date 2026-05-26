@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CalendarDays,
   ChevronDown,
@@ -9,16 +9,21 @@ import {
   Check,
   Clock,
   Download,
+  Flame,
   Heart,
   Home,
   KeyRound,
   LogOut,
   Plus,
   Settings,
+  Sparkles,
+  Star,
   Trash2,
+  Trophy,
   TrendingUp,
   UserX,
   X,
+  Zap,
 } from "lucide-react";
 import {
   CartesianGrid,
@@ -55,6 +60,7 @@ type AuthView = "login" | "signup";
 type PasswordResetStep = "idle" | "request" | "verify";
 type Handedness = "left" | "right";
 type ArmSide = "left" | "right";
+type AppThemeId = "midnight" | "sand" | "blush" | "sage" | "ocean";
 
 import type { Id } from "../convex/_generated/dataModel";
 
@@ -80,6 +86,31 @@ interface DisplayReadingValues {
   systolic: number;
   diastolic: number;
   pulse: number;
+}
+
+interface AddMeasurementPrefill {
+  systolic: number;
+  diastolic: number;
+  pulse: number;
+  sampleCount: number;
+  source: "default" | "recent_10_days" | "recent_readings";
+}
+
+interface PressureChartPoint {
+  date: string;
+  sys: number;
+  dia: number;
+  pulse: number;
+  count: number;
+}
+
+interface ChartInteractionState {
+  activeTooltipIndex: number | string | null | undefined;
+  isTooltipActive: boolean;
+  activeCoordinate?: {
+    x?: number;
+    y?: number;
+  };
 }
 
 interface PressurePreferences {
@@ -110,7 +141,7 @@ const defaultMeasurementPreferences: MeasurementPreferences = {
     lowDia: 60,
     elevatedSys: 120,
     high1Sys: 130,
-    high1Dia: 80,
+    high1Dia: 85,
     high2Sys: 140,
     high2Dia: 90,
     high3Sys: 180,
@@ -125,11 +156,12 @@ const defaultMeasurementPreferences: MeasurementPreferences = {
 const PRESSURE_RULES = {
   lowSys: 90,
   lowDia: 60,
+  normalDiaMin: 80,
   normalSysMax: 119,
   normalDiaMax: 79,
   high1SysMin: 130,
   high1SysMax: 139,
-  high1DiaMin: 80,
+  high1DiaMin: 85,
   high1DiaMax: 89,
   high2SysMin: 140,
   high2DiaMin: 90,
@@ -139,6 +171,226 @@ const PRESSURE_RULES = {
 
 const OTP_CODE_VALIDITY_SECONDS = 10 * 60;
 const OTP_RESEND_COOLDOWN_SECONDS = 30;
+const PREFILL_LOOKBACK_DAYS = 10;
+const PREFILL_MIN_RECENT_SAMPLE = 3;
+const PREFILL_MAX_FALLBACK_SAMPLE = 10;
+const ADD_DEFAULTS = {
+  systolic: 120,
+  diastolic: 80,
+  pulse: 72,
+} as const;
+
+interface AppThemePalette {
+  id: AppThemeId;
+  label: string;
+  background: string;
+  pathColor: string;
+  cardBg: string;
+  cardBorder: string;
+  cardShadow: string;
+  menuGradient: string;
+  menuOverlay: string;
+  accent: string;
+  onAccent: string;
+  accentMuted: string;
+  success: string;
+  warning: string;
+  danger: string;
+  info: string;
+  heart: string;
+  swatchA: string;
+  swatchB: string;
+}
+
+const THEME_STORAGE_KEY = "bp-theme";
+const DEFAULT_THEME_ID: AppThemeId = "midnight";
+const THEME_IDS: AppThemeId[] = ["midnight", "sand", "ocean", "blush", "sage"];
+
+const APP_THEME_PALETTES: Record<AppThemeId, AppThemePalette> = {
+  midnight: {
+    id: "midnight",
+    label: "Główny",
+    background: "#0A0A0A",
+    pathColor: "rgba(152,185,255,0.90)",
+    cardBg: "rgba(17, 18, 22, 0.84)",
+    cardBorder: "rgba(255, 255, 255, 0.10)",
+    cardShadow: "0 14px 32px rgba(0, 0, 0, 0.44)",
+    menuGradient:
+      "linear-gradient(165deg, rgba(26,31,44,0.8) 0%, rgba(18,23,34,0.84) 38%, rgba(10,13,21,0.9) 100%)",
+    menuOverlay:
+      "radial-gradient(90% 110% at 50% -25%, rgba(10,132,255,0.10), rgba(10,132,255,0) 56%), radial-gradient(80% 100% at 50% 140%, rgba(0,0,0,0.28), rgba(0,0,0,0) 70%)",
+    accent: "#0A84FF",
+    onAccent: "#FFFFFF",
+    accentMuted: "#BFDFFF",
+    success: "#30D158",
+    warning: "#FF9F0A",
+    danger: "#FF453A",
+    info: "#7AB8FF",
+    heart: "#FF453A",
+    swatchA: "#0A84FF",
+    swatchB: "#1B2435",
+  },
+  sand: {
+    id: "sand",
+    label: "Biało-czarny",
+    background: "#E9E7E4",
+    pathColor: "rgba(40,40,40,0.22)",
+    cardBg: "rgba(248, 247, 245, 0.82)",
+    cardBorder: "rgba(20, 20, 20, 0.14)",
+    cardShadow: "0 12px 28px rgba(0, 0, 0, 0.10)",
+    menuGradient:
+      "linear-gradient(165deg, rgba(245,245,243,0.88) 0%, rgba(232,231,228,0.92) 38%, rgba(220,218,214,0.95) 100%)",
+    menuOverlay:
+      "radial-gradient(90% 110% at 50% -25%, rgba(255,255,255,0.46), rgba(255,255,255,0) 58%), radial-gradient(80% 100% at 50% 140%, rgba(0,0,0,0.07), rgba(0,0,0,0) 70%)",
+    accent: "#2A2A2A",
+    onAccent: "#F5F5F5",
+    accentMuted: "#1B1B1B",
+    success: "#2C2C2C",
+    warning: "#8A6A1E",
+    danger: "#9B3B3B",
+    info: "#4A617A",
+    heart: "#4C4C4C",
+    swatchA: "#F8F8F8",
+    swatchB: "#1F1F1F",
+  },
+  blush: {
+    id: "blush",
+    label: "Różowy",
+    background: "#151015",
+    pathColor: "rgba(242,183,215,0.86)",
+    cardBg: "rgba(35, 21, 33, 0.84)",
+    cardBorder: "rgba(245, 201, 230, 0.14)",
+    cardShadow: "0 14px 32px rgba(8, 3, 8, 0.46)",
+    menuGradient:
+      "linear-gradient(165deg, rgba(53,32,50,0.80) 0%, rgba(38,24,37,0.84) 38%, rgba(24,15,24,0.90) 100%)",
+    menuOverlay:
+      "radial-gradient(90% 110% at 50% -25%, rgba(217,119,168,0.16), rgba(217,119,168,0) 56%), radial-gradient(80% 100% at 50% 140%, rgba(0,0,0,0.28), rgba(0,0,0,0) 70%)",
+    accent: "#D977A8",
+    onAccent: "#FFFFFF",
+    accentMuted: "#F2C6DE",
+    success: "#78C8A8",
+    warning: "#E3A37A",
+    danger: "#DC728A",
+    info: "#E8A9CB",
+    heart: "#F28CB5",
+    swatchA: "#D977A8",
+    swatchB: "#34212F",
+  },
+  sage: {
+    id: "sage",
+    label: "Szałwia",
+    background: "#0D1412",
+    pathColor: "rgba(165,220,198,0.88)",
+    cardBg: "rgba(19, 31, 27, 0.84)",
+    cardBorder: "rgba(186, 232, 212, 0.14)",
+    cardShadow: "0 14px 32px rgba(4, 9, 7, 0.44)",
+    menuGradient:
+      "linear-gradient(165deg, rgba(28,46,39,0.80) 0%, rgba(20,34,30,0.84) 38%, rgba(12,22,18,0.90) 100%)",
+    menuOverlay:
+      "radial-gradient(90% 110% at 50% -25%, rgba(83,179,140,0.17), rgba(83,179,140,0) 56%), radial-gradient(80% 100% at 50% 140%, rgba(0,0,0,0.26), rgba(0,0,0,0) 70%)",
+    accent: "#53B38C",
+    onAccent: "#FFFFFF",
+    accentMuted: "#BFE9D6",
+    success: "#48C78E",
+    warning: "#D4A65B",
+    danger: "#D97364",
+    info: "#8BDAB9",
+    heart: "#E98271",
+    swatchA: "#53B38C",
+    swatchB: "#21392E",
+  },
+  ocean: {
+    id: "ocean",
+    label: "Czarno-biały",
+    background: "#070707",
+    pathColor: "rgba(245,245,245,0.90)",
+    cardBg: "rgba(18, 18, 18, 0.86)",
+    cardBorder: "rgba(255, 255, 255, 0.18)",
+    cardShadow: "0 14px 32px rgba(0, 0, 0, 0.56)",
+    menuGradient:
+      "linear-gradient(165deg, rgba(46,46,46,0.78) 0%, rgba(30,30,30,0.84) 38%, rgba(12,12,12,0.92) 100%)",
+    menuOverlay:
+      "radial-gradient(90% 110% at 50% -25%, rgba(255,255,255,0.16), rgba(255,255,255,0) 56%), radial-gradient(80% 100% at 50% 140%, rgba(0,0,0,0.36), rgba(0,0,0,0) 70%)",
+    accent: "#F2F2F2",
+    onAccent: "#111111",
+    accentMuted: "#FFFFFF",
+    success: "#D1D1D1",
+    warning: "#D4AF5E",
+    danger: "#CF7272",
+    info: "#9FBAD7",
+    heart: "#F0F0F0",
+    swatchA: "#111111",
+    swatchB: "#FFFFFF",
+  },
+};
+
+const isAppThemeId = (value: unknown): value is AppThemeId =>
+  typeof value === "string" && (THEME_IDS as string[]).includes(value);
+
+const isLightMonoTheme = (themeId: AppThemeId): boolean => themeId === "sand";
+
+const hexToRgb = (hexColor: string): [number, number, number] | null => {
+  const normalized = hexColor.trim().replace("#", "");
+  if (![3, 6].includes(normalized.length)) return null;
+  const expanded =
+    normalized.length === 3
+      ? normalized
+          .split("")
+          .map((char) => `${char}${char}`)
+          .join("")
+      : normalized;
+  if (!/^[0-9a-fA-F]{6}$/.test(expanded)) return null;
+  const intValue = Number.parseInt(expanded, 16);
+  return [(intValue >> 16) & 255, (intValue >> 8) & 255, intValue & 255];
+};
+
+const withAlpha = (hexColor: string, alpha: number, fallback: string): string => {
+  const rgb = hexToRgb(hexColor);
+  if (!rgb) return fallback;
+  const clampedAlpha = Math.max(0, Math.min(1, alpha));
+  return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${clampedAlpha})`;
+};
+
+const readStoredThemeId = (): AppThemeId => {
+  if (typeof window === "undefined") return DEFAULT_THEME_ID;
+  const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+  return isAppThemeId(stored) ? stored : DEFAULT_THEME_ID;
+};
+
+const getThemeCssVars = (theme: AppThemePalette): React.CSSProperties =>
+  ({
+    "--theme-bg": theme.background,
+    "--theme-path-color": theme.pathColor,
+    "--theme-card-bg": theme.cardBg,
+    "--theme-card-border": theme.cardBorder,
+    "--theme-card-shadow": theme.cardShadow,
+    "--theme-menu-gradient": theme.menuGradient,
+    "--theme-menu-overlay": theme.menuOverlay,
+    "--theme-accent": theme.accent,
+    "--theme-on-accent": theme.onAccent,
+    "--theme-accent-muted": theme.accentMuted,
+    "--theme-success": theme.success,
+    "--theme-warning": theme.warning,
+    "--theme-danger": theme.danger,
+    "--theme-info": theme.info,
+    "--theme-heart": theme.heart,
+    "--theme-accent-soft": withAlpha(theme.accent, 0.22, "rgba(10, 132, 255, 0.22)"),
+    "--theme-accent-soft-strong": withAlpha(theme.accent, 0.3, "rgba(10, 132, 255, 0.3)"),
+    "--theme-accent-border": withAlpha(theme.accent, 0.75, "rgba(10, 132, 255, 0.75)"),
+    "--theme-success-soft": withAlpha(theme.success, 0.2, "rgba(48, 209, 88, 0.2)"),
+    "--theme-success-border": withAlpha(theme.success, 0.32, "rgba(48, 209, 88, 0.32)"),
+    "--theme-warning-soft": withAlpha(theme.warning, 0.22, "rgba(255, 159, 10, 0.22)"),
+    "--theme-warning-border": withAlpha(theme.warning, 0.34, "rgba(255, 159, 10, 0.34)"),
+    "--theme-danger-soft": withAlpha(theme.danger, 0.2, "rgba(255, 69, 58, 0.2)"),
+    "--theme-danger-border": withAlpha(theme.danger, 0.34, "rgba(255, 69, 58, 0.34)"),
+    "--theme-info-soft": withAlpha(theme.info, 0.2, "rgba(122, 184, 255, 0.2)"),
+    "--theme-info-border": withAlpha(theme.info, 0.3, "rgba(122, 184, 255, 0.3)"),
+    "--theme-chart-sys": theme.info,
+    "--theme-chart-dia": theme.warning,
+    "--theme-chart-sys-soft": withAlpha(theme.info, 0.3, "rgba(122, 184, 255, 0.3)"),
+    "--theme-chart-dia-soft": withAlpha(theme.warning, 0.3, "rgba(255, 159, 10, 0.3)"),
+    "--theme-chart-sys-glow": withAlpha(theme.info, 0.86, "rgba(122, 184, 255, 0.86)"),
+  }) as React.CSSProperties;
 
 const clamp = (value: unknown, min: number, max: number, fallback: number) => {
   const parsed = typeof value === "number" ? value : Number(value);
@@ -154,7 +406,8 @@ const normalizeMeasurementPreferences = (candidate: MeasurementPreferences): Mea
   const high1Sys = clamp(candidate.pressure.high1Sys, elevatedSys + 1, 170, defaults.pressure.high1Sys);
   const high2Sys = clamp(candidate.pressure.high2Sys, high1Sys + 1, 190, defaults.pressure.high2Sys);
   const high3Sys = clamp(candidate.pressure.high3Sys, high2Sys + 1, 230, defaults.pressure.high3Sys);
-  const high1Dia = clamp(candidate.pressure.high1Dia, lowDia + 1, 110, defaults.pressure.high1Dia);
+  const minHighNormalDia = Math.max(PRESSURE_RULES.high1DiaMin, lowDia + 1);
+  const high1Dia = clamp(candidate.pressure.high1Dia, minHighNormalDia, 110, defaults.pressure.high1Dia);
   const high2Dia = clamp(candidate.pressure.high2Dia, high1Dia + 1, 130, defaults.pressure.high2Dia);
   const high3Dia = clamp(candidate.pressure.high3Dia, high2Dia + 1, 150, defaults.pressure.high3Dia);
   const pulseLow = clamp(candidate.pulse.low, 35, 120, defaults.pulse.low);
@@ -179,20 +432,35 @@ const normalizeMeasurementPreferences = (candidate: MeasurementPreferences): Mea
   };
 };
 
+const areMeasurementPreferencesEqual = (
+  left: MeasurementPreferences,
+  right: MeasurementPreferences,
+): boolean =>
+  left.pressure.lowSys === right.pressure.lowSys &&
+  left.pressure.lowDia === right.pressure.lowDia &&
+  left.pressure.elevatedSys === right.pressure.elevatedSys &&
+  left.pressure.high1Sys === right.pressure.high1Sys &&
+  left.pressure.high1Dia === right.pressure.high1Dia &&
+  left.pressure.high2Sys === right.pressure.high2Sys &&
+  left.pressure.high2Dia === right.pressure.high2Dia &&
+  left.pressure.high3Sys === right.pressure.high3Sys &&
+  left.pressure.high3Dia === right.pressure.high3Dia &&
+  left.pulse.low === right.pulse.low &&
+  left.pulse.high === right.pulse.high;
+
 const classifyPressure = (
   sys: number,
   dia: number,
   pressurePrefs: PressurePreferences = defaultMeasurementPreferences.pressure,
 ): PressureCategory => {
   const { lowSys, lowDia, elevatedSys, high1Sys, high1Dia, high2Sys, high2Dia } = pressurePrefs;
+  const normalDiaStart = Math.max(lowDia + 1, high1Dia - 5);
 
   if (sys >= high2Sys || dia >= high2Dia) return "high2";
-  if ((sys >= high1Sys && sys < high2Sys) || (dia >= high1Dia && dia < high2Dia)) {
-    return "high1";
-  }
+  if (sys >= high1Sys || dia >= high1Dia) return "high1";
   if (sys < lowSys || dia < lowDia) return "low";
-  if (sys < elevatedSys && dia < high1Dia) return "normal";
-  return "elevated";
+  if (sys >= elevatedSys || dia >= normalDiaStart) return "elevated";
+  return "normal";
 };
 
 const classifyPulse = (pulse: number, pulsePrefs: PulsePreferences): PulseCategory => {
@@ -203,10 +471,10 @@ const classifyPulse = (pulse: number, pulsePrefs: PulsePreferences): PulseCatego
 
 const getCategoryLabel = (category: PressureCategory): string => {
   const labels = {
-    normal: "Norma",
-    elevated: "Podwyższone",
-    high1: "Wysokie I°",
-    high2: "Wysokie II°",
+    normal: "Prawidłowe",
+    elevated: "Prawidłowe",
+    high1: "Wysokie prawidłowe",
+    high2: "Nadciśnienie",
     low: "Niskie",
   };
 
@@ -225,9 +493,9 @@ const getPulseCategoryLabel = (category: PulseCategory): string => {
 
 const getPulseCategoryColor = (category: PulseCategory): string => {
   const colors = {
-    low: "#64D2FF",
-    normal: "rgba(255,255,255,0.55)",
-    high: "#FF9F0A",
+    low: "var(--theme-info)",
+    normal: "var(--theme-accent-muted)",
+    high: "var(--theme-warning)",
   };
 
   return colors[category];
@@ -243,11 +511,31 @@ const normalizeArmSide = (value: unknown, fallback: ArmSide): ArmSide =>
 
 const getCategoryStyles = (category: PressureCategory) => {
   const styles = {
-    normal: { bg: "rgba(48, 209, 88, 0.20)", text: "#30D158", border: "rgba(48,209,88,0.30)" },
-    elevated: { bg: "rgba(255, 159, 10, 0.20)", text: "#FF9F0A", border: "rgba(255,159,10,0.30)" },
-    high1: { bg: "rgba(255, 159, 10, 0.20)", text: "#FF9F0A", border: "rgba(255,159,10,0.30)" },
-    high2: { bg: "rgba(255, 69, 58, 0.20)", text: "#FF453A", border: "rgba(255,69,58,0.30)" },
-    low: { bg: "rgba(100, 210, 255, 0.20)", text: "#64D2FF", border: "rgba(100,210,255,0.30)" },
+    normal: {
+      bg: "var(--theme-success-soft)",
+      text: "var(--theme-success)",
+      border: "var(--theme-success-border)",
+    },
+    elevated: {
+      bg: "var(--theme-success-soft)",
+      text: "var(--theme-success)",
+      border: "var(--theme-success-border)",
+    },
+    high1: {
+      bg: "var(--theme-warning-soft)",
+      text: "var(--theme-warning)",
+      border: "var(--theme-warning-border)",
+    },
+    high2: {
+      bg: "var(--theme-danger-soft)",
+      text: "var(--theme-danger)",
+      border: "var(--theme-danger-border)",
+    },
+    low: {
+      bg: "var(--theme-info-soft)",
+      text: "var(--theme-info)",
+      border: "var(--theme-info-border)",
+    },
   };
 
   return styles[category];
@@ -369,6 +657,12 @@ const ensureLocalDate = (date: Date): Date => {
   return isValidDate(date) ? date : new Date();
 };
 
+const clampDateToNow = (date: Date, now: Date = new Date()): Date => {
+  const safeDate = ensureLocalDate(date);
+  const safeNow = ensureLocalDate(now);
+  return safeDate.getTime() > safeNow.getTime() ? safeNow : safeDate;
+};
+
 const startOfLocalDay = (date: Date): Date => {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 };
@@ -400,6 +694,78 @@ const getDisplayReadingValues = (reading: BloodPressureReading): DisplayReadingV
     systolic: Math.round((reading.systolic + reading.secondArm.systolic) / 2),
     diastolic: Math.round((reading.diastolic + reading.secondArm.diastolic) / 2),
     pulse: Math.round((reading.pulse + reading.secondArm.pulse) / 2),
+  };
+};
+
+const getTooltipIndexFromInteraction = (
+  interaction: ChartInteractionState,
+  pointsCount: number,
+): number | null => {
+  const raw = interaction.activeTooltipIndex;
+  const parsed =
+    typeof raw === "number"
+      ? raw
+      : typeof raw === "string"
+        ? Number.parseInt(raw, 10)
+        : Number.NaN;
+
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed >= pointsCount) {
+    return null;
+  }
+
+  return Math.floor(parsed);
+};
+
+const trimmedMeanRounded = (values: number[]): number | null => {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const trimEachSide = Math.min(2, Math.floor(sorted.length * 0.1));
+  const core =
+    trimEachSide > 0 && sorted.length - trimEachSide * 2 > 0
+      ? sorted.slice(trimEachSide, sorted.length - trimEachSide)
+      : sorted;
+  const total = core.reduce((sum, value) => sum + value, 0);
+  return Math.round(total / core.length);
+};
+
+const getAddMeasurementPrefill = (
+  readings: BloodPressureReading[],
+  now: Date,
+): AddMeasurementPrefill => {
+  if (readings.length === 0) {
+    return {
+      ...ADD_DEFAULTS,
+      sampleCount: 0,
+      source: "default",
+    };
+  }
+
+  const windowStart = addDays(startOfLocalDay(now), -(PREFILL_LOOKBACK_DAYS - 1)).getTime();
+  const recentWindowReadings = readings.filter((reading) => reading.timestamp.getTime() >= windowStart);
+
+  const pool =
+    recentWindowReadings.length >= PREFILL_MIN_RECENT_SAMPLE
+      ? recentWindowReadings
+      : readings.slice(0, Math.min(PREFILL_MAX_FALLBACK_SAMPLE, readings.length));
+
+  const displayRows = pool.map(getDisplayReadingValues);
+  const latestDisplay = getDisplayReadingValues(readings[0]);
+
+  const rawSys = trimmedMeanRounded(displayRows.map((row) => row.systolic)) ?? latestDisplay.systolic;
+  const rawDia = trimmedMeanRounded(displayRows.map((row) => row.diastolic)) ?? latestDisplay.diastolic;
+  const rawPulse = trimmedMeanRounded(displayRows.map((row) => row.pulse)) ?? latestDisplay.pulse;
+
+  const systolic = clamp(rawSys, 60, 250, ADD_DEFAULTS.systolic);
+  const diastolicClamped = clamp(rawDia, 40, 150, ADD_DEFAULTS.diastolic);
+  const pulse = clamp(rawPulse, 30, 200, ADD_DEFAULTS.pulse);
+  const diastolic = Math.min(diastolicClamped, Math.max(40, systolic - 5));
+
+  return {
+    systolic,
+    diastolic,
+    pulse,
+    sampleCount: pool.length,
+    source: recentWindowReadings.length >= PREFILL_MIN_RECENT_SAMPLE ? "recent_10_days" : "recent_readings",
   };
 };
 
@@ -472,44 +838,60 @@ const calculateStreak = (readings: BloodPressureReading[]) => {
   return { current, best, hasTodayEntry };
 };
 
-const getStreakGraphic = (current: number, hasTodayEntry: boolean): { src: string; alt: string } => {
+const getStreakGraphic = (
+  current: number,
+  hasTodayEntry: boolean,
+): {
+  icon: React.ElementType<{ className?: string; strokeWidth?: number; color?: string }>;
+  alt: string;
+  color: string;
+  glow: string;
+} => {
   if (current >= 30) {
     return {
-      src: "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f3c6.png",
+      icon: Trophy,
       alt: "Trofeum passy",
+      color: "var(--theme-warning)",
+      glow: "var(--theme-warning-soft)",
     };
   }
   if (current >= 14) {
     return {
-      src: hasTodayEntry
-        ? "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f525.png"
-        : "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/2728.png",
+      icon: hasTodayEntry ? Flame : Sparkles,
       alt: "Wysoka passa",
+      color: hasTodayEntry ? "var(--theme-warning)" : "var(--theme-info)",
+      glow: hasTodayEntry ? "var(--theme-warning-soft)" : "var(--theme-info-soft)",
     };
   }
   if (current >= 7) {
     return {
-      src: "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/26a1.png",
+      icon: Zap,
       alt: "Solidna passa",
+      color: "var(--theme-info)",
+      glow: "var(--theme-info-soft)",
     };
   }
   if (current >= 3) {
     return {
-      src: "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f31f.png",
+      icon: Star,
       alt: "Dobra passa",
+      color: "var(--theme-success)",
+      glow: "var(--theme-success-soft)",
     };
   }
   if (current >= 1) {
     return {
-      src: hasTodayEntry
-        ? "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f525.png"
-        : "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f642.png",
+      icon: hasTodayEntry ? Flame : Sparkles,
       alt: "Początek passy",
+      color: hasTodayEntry ? "var(--theme-warning)" : "var(--theme-accent-muted)",
+      glow: hasTodayEntry ? "var(--theme-warning-soft)" : "var(--theme-accent-soft)",
     };
   }
   return {
-    src: "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f525.png",
+    icon: Flame,
     alt: "Nowa passa",
+    color: "var(--theme-info)",
+    glow: "var(--theme-info-soft)",
   };
 };
 
@@ -654,7 +1036,8 @@ const useMobileOverscrollLock = (containerRef: React.RefObject<HTMLElement | nul
 const AuthScreen: React.FC<{
   view: AuthView;
   onChangeView: (view: AuthView) => void;
-}> = ({ view, onChangeView }) => {
+  theme: AppThemePalette;
+}> = ({ view, onChangeView, theme }) => {
   const authScreenRef = useRef<HTMLDivElement>(null);
   useMobileOverscrollLock(authScreenRef);
   const { signIn } = useAuthActions();
@@ -678,6 +1061,8 @@ const AuthScreen: React.FC<{
   const [resetCodeResendReadyAtMs, setResetCodeResendReadyAtMs] = useState<number | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const authRequestInFlightRef = useRef(false);
+  const themeCssVars = useMemo(() => getThemeCssVars(theme), [theme]);
+  const isLightTheme = isLightMonoTheme(theme.id);
 
   const normalizeEmail = (rawEmail: string) => rawEmail.trim().toLowerCase();
   const normalizeVerificationCode = (rawCode: string) => rawCode.replace(/\D/g, "").slice(0, 6);
@@ -1166,25 +1551,31 @@ const AuthScreen: React.FC<{
   return (
     <div
       ref={authScreenRef}
-      className="h-[100dvh] overflow-y-auto overscroll-none touch-pan-y flex items-center justify-center p-4 relative"
-      style={{ backgroundColor: "#0A0A0A" }}
+      className={`h-[100dvh] overflow-y-auto overscroll-none touch-pan-y flex items-center justify-center p-4 relative ${isLightTheme ? "theme-mono-light" : ""}`}
+      style={{
+        ...themeCssVars,
+        backgroundColor: "var(--theme-bg)",
+      }}
     >
       <BackgroundPaths />
       <div className="w-full max-w-md relative z-10">
         <div className="flex justify-center mb-8">
-          <div className="w-20 h-20 rounded-full flex items-center justify-center" style={{ background: "rgba(255, 255, 255, 0.06)" }}>
-            <Heart className="w-10 h-10" style={{ color: "#FF453A" }} />
+          <div
+            className="w-20 h-20 rounded-full flex items-center justify-center"
+            style={{ background: "var(--theme-accent-soft)" }}
+          >
+            <Heart className="w-10 h-10" style={{ color: "var(--theme-heart)" }} />
           </div>
         </div>
 
         <div
           className="rounded-3xl p-6"
           style={{
-            background: "rgba(19, 19, 22, 0.84)",
-            backdropFilter: "blur(18px) saturate(140%)",
-            WebkitBackdropFilter: "blur(18px) saturate(140%)",
-            border: "1px solid rgba(255, 255, 255, 0.12)",
-            boxShadow: "0 10px 28px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.09)",
+            background: "var(--theme-card-bg)",
+            backdropFilter: "blur(15px) saturate(132%)",
+            WebkitBackdropFilter: "blur(15px) saturate(132%)",
+            border: "1px solid var(--theme-card-border)",
+            boxShadow: "var(--theme-card-shadow)",
           }}
         >
           <h1 className="text-3xl font-bold text-white text-center mb-1">
@@ -1211,8 +1602,16 @@ const AuthScreen: React.FC<{
           </p>
 
           {awaitsEmailVerification && (
-            <div className="mb-4 rounded-2xl border border-[#30D158]/35 bg-[#30D158]/12 px-3 py-2.5 text-center">
-              <p className="text-[#9AF2B4] text-xs font-medium">Email z kodem został wysłany.</p>
+            <div
+              className="mb-4 rounded-2xl border px-3 py-2.5 text-center"
+              style={{
+                borderColor: "var(--theme-success-border)",
+                background: "var(--theme-success-soft)",
+              }}
+            >
+              <p className="text-xs font-medium" style={{ color: "var(--theme-success)" }}>
+                Email z kodem został wysłany.
+              </p>
               <p className="text-white/75 text-xs mt-1">
                 Kod wygasa za {formatSecondsToClock(verificationSecondsLeft ?? OTP_CODE_VALIDITY_SECONDS)}
               </p>
@@ -1220,8 +1619,16 @@ const AuthScreen: React.FC<{
           )}
 
           {passwordResetStep === "verify" && (
-            <div className="mb-4 rounded-2xl border border-[#0A84FF]/35 bg-[#0A84FF]/12 px-3 py-2.5 text-center">
-              <p className="text-[#CDE4FF] text-xs font-medium">Kod resetu został wysłany.</p>
+            <div
+              className="mb-4 rounded-2xl border px-3 py-2.5 text-center"
+              style={{
+                borderColor: "var(--theme-accent-border)",
+                background: "var(--theme-accent-soft)",
+              }}
+            >
+              <p className="text-xs font-medium" style={{ color: "var(--theme-accent-muted)" }}>
+                Kod resetu został wysłany.
+              </p>
               <p className="text-white/75 text-xs mt-1">
                 Kod wygasa za {formatSecondsToClock(resetCodeSecondsLeft ?? OTP_CODE_VALIDITY_SECONDS)}
               </p>
@@ -1237,7 +1644,7 @@ const AuthScreen: React.FC<{
                     type="text"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF]"
+                    className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[var(--theme-accent)]"
                     placeholder="Twoje imię"
                   />
                 </div>
@@ -1256,9 +1663,21 @@ const AuthScreen: React.FC<{
                           onClick={() => setDominantHand(hand)}
                           className="h-11 rounded-xl border text-sm font-medium transition-colors"
                           style={{
-                            borderColor: isSelected ? "rgba(10,132,255,0.75)" : "rgba(255,255,255,0.12)",
-                            background: isSelected ? "rgba(10,132,255,0.22)" : "rgba(255,255,255,0.04)",
-                            color: isSelected ? "#BFDFFF" : "rgba(255,255,255,0.78)",
+                            borderColor: isSelected
+                              ? "var(--theme-accent-border)"
+                              : isLightTheme
+                                ? "rgba(0,0,0,0.16)"
+                                : "rgba(255,255,255,0.12)",
+                            background: isSelected
+                              ? "var(--theme-accent-soft)"
+                              : isLightTheme
+                                ? "rgba(0,0,0,0.04)"
+                                : "rgba(255,255,255,0.04)",
+                            color: isSelected
+                              ? "var(--theme-accent-muted)"
+                              : isLightTheme
+                                ? "rgba(22,22,22,0.78)"
+                                : "rgba(255,255,255,0.78)",
                           }}
                         >
                           {hand === "right" ? "Praworęczny/a" : "Leworęczny/a"}
@@ -1278,7 +1697,7 @@ const AuthScreen: React.FC<{
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF]"
+                  className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[var(--theme-accent)]"
                   placeholder="twoj@email.pl"
                   required
                 />
@@ -1290,7 +1709,7 @@ const AuthScreen: React.FC<{
                   type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF]"
+                  className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[var(--theme-accent)]"
                   placeholder="Minimum 8 znaków"
                   required
                 />
@@ -1303,7 +1722,7 @@ const AuthScreen: React.FC<{
                     type="password"
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
-                    className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF]"
+                    className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[var(--theme-accent)]"
                     placeholder="Powtórz hasło"
                     required
                   />
@@ -1358,7 +1777,7 @@ const AuthScreen: React.FC<{
                     type="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF]"
+                    className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[var(--theme-accent)]"
                     placeholder="twoj@email.pl"
                     required
                   />
@@ -1394,7 +1813,7 @@ const AuthScreen: React.FC<{
                     inputMode="numeric"
                     autoComplete="one-time-code"
                     pattern="[0-9]*"
-                    className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF] tracking-[0.3em] text-center uppercase"
+                    className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[var(--theme-accent)] tracking-[0.3em] text-center uppercase"
                     placeholder="123456"
                     maxLength={6}
                     required
@@ -1407,7 +1826,7 @@ const AuthScreen: React.FC<{
                     type="password"
                     value={newPassword}
                     onChange={(e) => setNewPassword(e.target.value)}
-                    className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF]"
+                    className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[var(--theme-accent)]"
                     placeholder="Minimum 8 znaków"
                     required
                   />
@@ -1419,7 +1838,7 @@ const AuthScreen: React.FC<{
                     type="password"
                     value={confirmNewPassword}
                     onChange={(e) => setConfirmNewPassword(e.target.value)}
-                    className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF]"
+                    className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[var(--theme-accent)]"
                     placeholder="Powtórz nowe hasło"
                     required
                   />
@@ -1465,7 +1884,7 @@ const AuthScreen: React.FC<{
                   inputMode="numeric"
                   autoComplete="one-time-code"
                   pattern="[0-9]*"
-                  className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[#0A84FF] tracking-[0.3em] text-center uppercase"
+                  className="bg-white/5 border-white/10 text-white text-lg h-12 focus:border-[var(--theme-accent)] tracking-[0.3em] text-center uppercase"
                   placeholder="123456"
                   maxLength={6}
                   required
@@ -1507,11 +1926,15 @@ const AuthScreen: React.FC<{
           )}
 
           {error && (
-            <p className="mt-4 text-[#FF9F0A] text-sm text-center">{error}</p>
+            <p className="mt-4 text-sm text-center" style={{ color: "var(--theme-warning)" }}>
+              {error}
+            </p>
           )}
 
           {success && (
-            <p className="mt-4 text-[#30D158] text-sm text-center">{success}</p>
+            <p className="mt-4 text-sm text-center" style={{ color: "var(--theme-success)" }}>
+              {success}
+            </p>
           )}
 
         </div>
@@ -1554,7 +1977,8 @@ const ScrollPicker: React.FC<{
   min: number;
   max: number;
   label: string;
-}> = ({ value, onChange, min, max, label }) => {
+  isLightTheme?: boolean;
+}> = ({ value, onChange, min, max, label, isLightTheme = false }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const lastPlayedValueRef = useRef<number | null>(null);
   const lastPlayAtRef = useRef(0);
@@ -1569,6 +1993,11 @@ const ScrollPicker: React.FC<{
   const containerHeight = 240;
   const spacerHeight = (containerHeight - itemHeight) / 2;
   const [internalValue, setInternalValue] = useState(value);
+  const nearOpacity = isLightTheme ? 0.66 : 0.55;
+  const farOpacity = isLightTheme ? 0.3 : 0.2;
+  const pickerValueColor = isLightTheme ? "rgba(16,16,16,0.88)" : "#FFFFFF";
+  const pickerOverlayBorder = isLightTheme ? "rgba(0,0,0,0.16)" : "rgba(255,255,255,0.12)";
+  const pickerOverlayBg = isLightTheme ? "rgba(0,0,0,0.045)" : "rgba(255,255,255,0.04)";
 
   const playSelectionSound = (nextValue: number) => {
     if (lastPlayedValueRef.current === nextValue) return;
@@ -1780,7 +2209,7 @@ const ScrollPicker: React.FC<{
               style={{
                 height: itemHeight,
                 fontSize: "36px",
-                opacity: val === internalValue ? 1 : val >= internalValue - 1 && val <= internalValue + 1 ? 0.55 : 0.2,
+                opacity: val === internalValue ? 1 : val >= internalValue - 1 && val <= internalValue + 1 ? nearOpacity : farOpacity,
                 fontWeight: val === internalValue ? 650 : 420,
                 lineHeight: 0.95,
                 letterSpacing: "0em",
@@ -1790,7 +2219,7 @@ const ScrollPicker: React.FC<{
                     : val >= internalValue - 1 && val <= internalValue + 1
                       ? "scale(0.86)"
                       : "scale(0.7)",
-                color: "#FFFFFF",
+                color: pickerValueColor,
                 fontVariantNumeric: "tabular-nums lining-nums",
                 textRendering: "optimizeLegibility",
               }}
@@ -1804,8 +2233,8 @@ const ScrollPicker: React.FC<{
         <div
           className="absolute top-1/2 left-1 right-1 h-14 -translate-y-1/2 pointer-events-none border-y rounded-xl"
           style={{
-            borderColor: "rgba(255,255,255,0.12)",
-            background: "rgba(255,255,255,0.04)",
+            borderColor: pickerOverlayBorder,
+            background: pickerOverlayBg,
           }}
         />
       </div>
@@ -1884,6 +2313,10 @@ const SwipeDeleteCard: React.FC<{
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (disabled) return;
     if (event.pointerType === "mouse" && event.button !== 0) return;
+    const target = event.target as HTMLElement | null;
+    if (target?.closest("button, a, input, textarea, select, [role='button'], [data-no-swipe='true']")) {
+      return;
+    }
     pointerIdRef.current = event.pointerId;
     event.currentTarget.setPointerCapture(event.pointerId);
     axisRef.current = null;
@@ -1929,9 +2362,9 @@ const SwipeDeleteCard: React.FC<{
         className="absolute inset-0 flex items-center justify-end px-3"
         style={{
           opacity: backdropOpacity,
-          background: "linear-gradient(90deg, rgba(255,69,58,0.08), rgba(255,69,58,0.36))",
-          border: `1px solid rgba(255,69,58,${0.1 + reveal * 0.34})`,
-          boxShadow: `inset 0 0 24px rgba(255,69,58,${0.08 + reveal * 0.26})`,
+          background: "linear-gradient(90deg, rgba(255,255,255,0), var(--theme-danger-soft))",
+          border: "1px solid var(--theme-danger-border)",
+          boxShadow: "inset 0 0 24px var(--theme-danger-soft)",
         }}
       >
         <button
@@ -1941,7 +2374,12 @@ const SwipeDeleteCard: React.FC<{
             onOpenChange(false);
             onRequestDelete();
           }}
-          className="h-12 w-12 rounded-2xl border border-[#FF453A]/55 bg-[#FF453A]/22 text-[#FFB4AF] flex items-center justify-center"
+          className="h-12 w-12 rounded-2xl border bg-white/[0.02] flex items-center justify-center"
+          style={{
+            borderColor: "var(--theme-danger-border)",
+            color: "var(--theme-danger)",
+            background: "var(--theme-danger-soft)",
+          }}
           aria-label="Usuń pomiar"
           disabled={disabled}
         >
@@ -1972,7 +2410,15 @@ const PressureTooltipCard: React.FC<{
   label?: string | number;
   pressurePrefs?: PressurePreferences;
   isCoarsePointer?: boolean;
-}> = ({ active, payload, label, pressurePrefs = defaultMeasurementPreferences.pressure, isCoarsePointer = false }) => {
+  isLightTheme?: boolean;
+}> = ({
+  active,
+  payload,
+  label,
+  pressurePrefs = defaultMeasurementPreferences.pressure,
+  isCoarsePointer = false,
+  isLightTheme = false,
+}) => {
   const point = payload?.[0]?.payload;
   if (!active || !point) return null;
 
@@ -1982,52 +2428,43 @@ const PressureTooltipCard: React.FC<{
   return (
     <div
       style={{
-        background: "rgba(14, 14, 16, 0.93)",
-        backdropFilter: "blur(16px) saturate(140%)",
-        border: "1px solid rgba(255,255,255,0.16)",
-        borderRadius: "14px",
-        padding: "12px 14px",
-        color: "#FFFFFF",
-        minWidth: isCoarsePointer ? "206px" : "190px",
-        boxShadow: "0 10px 26px rgba(0,0,0,0.45)",
+        background: "var(--theme-card-bg)",
+        backdropFilter: "blur(10px) saturate(130%)",
+        border: "1px solid var(--theme-card-border)",
+        borderRadius: "12px",
+        padding: isCoarsePointer ? "8px 10px" : "10px 12px",
+        color: "var(--theme-accent-muted)",
+        minWidth: isCoarsePointer ? "154px" : "176px",
+        boxShadow: isLightTheme ? "0 8px 16px rgba(0,0,0,0.14)" : "0 8px 18px rgba(0,0,0,0.34)",
       }}
     >
-      <p style={{ fontSize: "12px", opacity: 0.78, marginBottom: "8px" }}>{label}</p>
-      {typeof point.count === "number" && point.count > 0 && (
-        <p style={{ fontSize: "11px", opacity: 0.65, marginBottom: "8px" }}>
-          Średnia z dnia · {point.count === 1 ? "1 pomiar" : `${point.count} pomiary`}
-        </p>
-      )}
-      <div style={{ display: "flex", justifyContent: "space-between", gap: "16px", marginBottom: "6px" }}>
-        <span style={{ color: "#7AB8FF", fontSize: "12px" }}>SYS</span>
-        <span style={{ fontWeight: 700, fontSize: "14px" }}>{formatPreciseValueOrDash(point.sys)}</span>
+      <p style={{ fontSize: "11px", opacity: 0.72, marginBottom: "5px" }}>{label}</p>
+      <div style={{ display: "flex", alignItems: "baseline", gap: "8px", marginBottom: "5px" }}>
+        <span style={{ fontWeight: 700, fontSize: isCoarsePointer ? "19px" : "20px", lineHeight: 1 }}>
+          {formatPreciseValueOrDash(point.sys)}/{formatPreciseValueOrDash(point.dia)}
+        </span>
+        <span style={{ fontSize: "12px", opacity: 0.72, whiteSpace: "nowrap" }}>
+          {formatPreciseValueOrDash(point.pulse)} bpm
+        </span>
       </div>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: "16px", marginBottom: "6px" }}>
-        <span style={{ color: "#FFB454", fontSize: "12px" }}>DIA</span>
-        <span style={{ fontWeight: 700, fontSize: "14px" }}>{formatPreciseValueOrDash(point.dia)}</span>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "10px" }}>
+        <span style={{ fontSize: "11px", opacity: 0.72 }}>
+          {typeof point.count === "number" && point.count > 1 ? `Śr. z ${point.count} pom.` : "1 pomiar"}
+        </span>
+        <span
+          style={{
+            fontSize: "11px",
+            borderRadius: "999px",
+            border: `1px solid ${categoryStyles.border}`,
+            background: categoryStyles.bg,
+            color: categoryStyles.text,
+            padding: "2px 7px",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {getCategoryLabel(category)}
+        </span>
       </div>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: "16px", marginBottom: "8px" }}>
-        <span style={{ color: "rgba(255,255,255,0.68)", fontSize: "12px" }}>Puls</span>
-        <span style={{ fontWeight: 600, fontSize: "14px" }}>{formatPreciseValueOrDash(point.pulse)} bpm</span>
-      </div>
-      <span
-        style={{
-          display: "inline-block",
-          borderRadius: "999px",
-          padding: "2px 8px",
-          fontSize: "11px",
-          border: `1px solid ${categoryStyles.border}`,
-          background: categoryStyles.bg,
-          color: categoryStyles.text,
-        }}
-      >
-        {getCategoryLabel(category)}
-      </span>
-      {isCoarsePointer && (
-        <p style={{ marginTop: "8px", fontSize: "10px", opacity: 0.65 }}>
-          Przytrzymaj punkt na wykresie, aby odczytać wartości.
-        </p>
-      )}
     </div>
   );
 };
@@ -2044,11 +2481,11 @@ const GlassCard: React.FC<{ children: React.ReactNode; className?: string }> = (
     <div
       className={`rounded-3xl p-6 ${className}`}
       style={{
-        background: "rgba(19, 19, 22, 0.82)",
-        backdropFilter: "blur(18px) saturate(140%)",
-        WebkitBackdropFilter: "blur(18px) saturate(140%)",
-        border: "1px solid rgba(255, 255, 255, 0.12)",
-        boxShadow: "0 10px 28px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.09)",
+        background: "var(--theme-card-bg)",
+        backdropFilter: "blur(15px) saturate(132%)",
+        WebkitBackdropFilter: "blur(15px) saturate(132%)",
+        border: "1px solid var(--theme-card-border)",
+        boxShadow: "var(--theme-card-shadow)",
       }}
     >
       {children}
@@ -2128,6 +2565,7 @@ const DateTimePicker: React.FC<{
   onChange: (next: Date) => void;
 }> = ({ value, onChange }) => {
   const safeValue = useMemo(() => ensureLocalDate(value), [value]);
+  const now = new Date();
   const [isOpen, setIsOpen] = useState(false);
   const [visibleMonth, setVisibleMonth] = useState(() => startOfMonth(safeValue));
 
@@ -2139,22 +2577,26 @@ const DateTimePicker: React.FC<{
 
   const calendarDays = useMemo(() => buildCalendarDays(visibleMonth), [visibleMonth]);
   const selectedDayStamp = startOfLocalDay(safeValue).getTime();
-  const todayStamp = startOfLocalDay(new Date()).getTime();
+  const todayStamp = startOfLocalDay(now).getTime();
+  const currentMonthStamp = startOfMonth(now).getTime();
+  const visibleMonthStamp = startOfMonth(visibleMonth).getTime();
+  const canGoToNextMonth = visibleMonthStamp < currentMonthStamp;
 
   const setSelectedDay = (day: Date) => {
-    onChange(mergeDateAndTime(safeValue, toDateInput(day)));
+    const merged = mergeDateAndTime(safeValue, toDateInput(day));
+    onChange(clampDateToNow(merged));
   };
 
   const changeHours = (delta: number) => {
     const next = new Date(safeValue);
     next.setHours((next.getHours() + delta + 24) % 24);
-    onChange(next);
+    onChange(clampDateToNow(next));
   };
 
   const changeMinutes = (delta: number) => {
     const next = new Date(safeValue);
     next.setMinutes(next.getMinutes() + delta);
-    onChange(next);
+    onChange(clampDateToNow(next));
   };
 
   const monthLabel = visibleMonth.toLocaleDateString("pl-PL", {
@@ -2247,8 +2689,18 @@ const DateTimePicker: React.FC<{
             <p className="text-white text-base font-semibold capitalize">{monthLabel}</p>
             <button
               type="button"
-              onClick={() => setVisibleMonth((prev) => addMonths(prev, 1))}
-              className="w-9 h-9 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 transition-colors flex items-center justify-center"
+              onClick={() => {
+                if (canGoToNextMonth) {
+                  setVisibleMonth((prev) => addMonths(prev, 1));
+                }
+              }}
+              className={`w-9 h-9 rounded-xl border transition-colors flex items-center justify-center ${
+                canGoToNextMonth
+                  ? "border-white/10 bg-white/5 hover:bg-white/10"
+                  : "border-white/10 bg-white/[0.02] text-white/35 cursor-not-allowed"
+              }`}
+              disabled={!canGoToNextMonth}
+              aria-label="Następny miesiąc"
             >
               <ChevronRight className="w-4 h-4 text-white/80" />
             </button>
@@ -2264,21 +2716,32 @@ const DateTimePicker: React.FC<{
               const dayStamp = startOfLocalDay(cell.date).getTime();
               const isSelected = dayStamp === selectedDayStamp;
               const isToday = dayStamp === todayStamp;
+              const isFutureDay = dayStamp > todayStamp;
 
               return (
                 <button
                   key={cell.date.toISOString()}
                   type="button"
-                  onClick={() => setSelectedDay(cell.date)}
+                  onClick={() => {
+                    if (!isFutureDay) {
+                      setSelectedDay(cell.date);
+                    }
+                  }}
+                  disabled={isFutureDay}
                   className={`h-9 rounded-lg text-sm font-medium transition-colors ${
-                    isSelected
-                      ? "bg-[#0A84FF] text-white"
-                      : isToday
-                        ? "border border-[#0A84FF]/60 text-[#7AB8FF]"
-                        : cell.inCurrentMonth
-                          ? "text-white/85 hover:bg-white/8"
-                          : "text-white/30 hover:bg-white/5"
+                    isFutureDay
+                      ? "text-white/25 cursor-not-allowed"
+                      : cell.inCurrentMonth
+                        ? "text-white/85 hover:bg-white/8"
+                        : "text-white/30 hover:bg-white/5"
                   }`}
+                  style={
+                    isSelected
+                      ? { background: "var(--theme-accent)", color: "var(--theme-on-accent)" }
+                      : isToday
+                        ? { border: "1px solid var(--theme-accent-border)", color: "var(--theme-info)" }
+                        : undefined
+                  }
                 >
                   {cell.date.getDate()}
                 </button>
@@ -2306,24 +2769,27 @@ const BloodPressureApp: React.FC = () => {
   // Auth state from Convex
   const userData = useQuery(api.authHelpers.getUser);
 
-  const [systolic, setSystolic] = useState(120);
-  const [diastolic, setDiastolic] = useState(80);
-  const [pulse, setPulse] = useState(72);
+  const [systolic, setSystolic] = useState<number>(ADD_DEFAULTS.systolic);
+  const [diastolic, setDiastolic] = useState<number>(ADD_DEFAULTS.diastolic);
+  const [pulse, setPulse] = useState<number>(ADD_DEFAULTS.pulse);
   const [enableSecondArm, setEnableSecondArm] = useState(false);
-  const [secondArmSystolic, setSecondArmSystolic] = useState(120);
-  const [secondArmDiastolic, setSecondArmDiastolic] = useState(80);
-  const [secondArmPulse, setSecondArmPulse] = useState(72);
+  const [secondArmSystolic, setSecondArmSystolic] = useState<number>(ADD_DEFAULTS.systolic);
+  const [secondArmDiastolic, setSecondArmDiastolic] = useState<number>(ADD_DEFAULTS.diastolic);
+  const [secondArmPulse, setSecondArmPulse] = useState<number>(ADD_DEFAULTS.pulse);
   const [readingDate, setReadingDate] = useState(new Date());
   const [note, setNote] = useState("");
 
   const [timeRange, setTimeRange] = useState<TimeRange>("7d");
   const [showSettings, setShowSettings] = useState(false);
+  const [themeId, setThemeId] = useState<AppThemeId>(() => readStoredThemeId());
+  const [draftThemeId, setDraftThemeId] = useState<AppThemeId>(() => readStoredThemeId());
   const [dominantHand, setDominantHand] = useState<Handedness>("right");
   const [draftDominantHand, setDraftDominantHand] = useState<Handedness>("right");
   const [settingsSections, setSettingsSections] = useState<Record<SettingsSectionKey, boolean>>({
     pulse: false,
     pressure: false,
   });
+  const [isSettingsDirty, setIsSettingsDirty] = useState(false);
   const [preferences, setPreferences] = useState<MeasurementPreferences>(defaultMeasurementPreferences);
   const [draftPreferences, setDraftPreferences] = useState<MeasurementPreferences>(preferences);
   const [pendingDeleteReadingId, setPendingDeleteReadingId] = useState<Id<"readings"> | null>(null);
@@ -2346,6 +2812,11 @@ const BloodPressureApp: React.FC = () => {
     if (typeof window === "undefined") return false;
     return window.matchMedia("(pointer: coarse)").matches;
   });
+  const [isMobileChartTooltipVisible, setIsMobileChartTooltipVisible] = useState(false);
+  const activeThemeId = showSettings ? draftThemeId : themeId;
+  const isActiveThemeLight = isLightMonoTheme(activeThemeId);
+  const currentTheme = APP_THEME_PALETTES[activeThemeId];
+  const themeCssVars = useMemo(() => getThemeCssVars(currentTheme), [currentTheme]);
 
   // Convex mutations
   const addReadingMutation = useMutation(api.readings.add);
@@ -2385,12 +2856,19 @@ const BloodPressureApp: React.FC = () => {
     if (showSettings) {
       setDraftPreferences(preferences);
       setDraftDominantHand(dominantHand);
+      setDraftThemeId(themeId);
+      setIsSettingsDirty(false);
       setSettingsSections({
         pulse: false,
         pressure: false,
       });
     }
-  }, [showSettings, preferences, dominantHand]);
+  }, [showSettings, preferences, dominantHand, themeId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(THEME_STORAGE_KEY, themeId);
+  }, [themeId]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -2411,6 +2889,7 @@ const BloodPressureApp: React.FC = () => {
     Number.isFinite(valueAsNumber) ? valueAsNumber : fallback;
 
   const updatePulseDraft = <K extends keyof PulsePreferences>(key: K, value: number) => {
+    setIsSettingsDirty(true);
     setDraftPreferences((prev) => ({
       ...prev,
       pulse: {
@@ -2421,6 +2900,7 @@ const BloodPressureApp: React.FC = () => {
   };
 
   const updatePressureDraft = <K extends keyof PressurePreferences>(key: K, value: number) => {
+    setIsSettingsDirty(true);
     setDraftPreferences((prev) => ({
       ...prev,
       pressure: {
@@ -2449,40 +2929,86 @@ const BloodPressureApp: React.FC = () => {
   };
 
   const handleSavePreferences = async () => {
+    if (!isSettingsDirty) {
+      setShowSettings(false);
+      setDataSyncError(null);
+      return;
+    }
+
     const normalized = normalizeMeasurementPreferences(draftPreferences);
+    const hasDominantHandChanged = draftDominantHand !== dominantHand;
+    const hasPreferencesChanged = !areMeasurementPreferencesEqual(normalized, preferences);
+    const hasThemeChanged = draftThemeId !== themeId;
+
+    if (!hasDominantHandChanged && !hasPreferencesChanged && !hasThemeChanged) {
+      setShowSettings(false);
+      setIsSettingsDirty(false);
+      setDataSyncError(null);
+      return;
+    }
 
     try {
-      if (draftDominantHand !== dominantHand) {
+      if (hasDominantHandChanged) {
         await setDominantHandMutation({ dominantHand: draftDominantHand });
         setDominantHand(draftDominantHand);
       }
-      await savePreferencesMutation({ preferences: normalized });
+      if (hasPreferencesChanged || hasThemeChanged) {
+        await savePreferencesMutation({ preferences: normalized, theme: draftThemeId });
+      }
       setPreferences(normalized);
+      setThemeId(draftThemeId);
+      setDraftThemeId(draftThemeId);
       setShowSettings(false);
+      setIsSettingsDirty(false);
       setDataSyncError(null);
     } catch (error) {
-      setDataSyncError(mapAppError(error, "Nie udało się zapisać ustawień."));
+      console.error("Manual settings save failed", error);
+      setDataSyncError(null);
     }
   };
 
   const handleCloseSettings = async () => {
+    if (!isSettingsDirty) {
+      setShowSettings(false);
+      setDataSyncError(null);
+      return;
+    }
+
     const normalized = normalizeMeasurementPreferences(draftPreferences);
+    const hasDominantHandChanged = draftDominantHand !== dominantHand;
+    const hasPreferencesChanged = !areMeasurementPreferencesEqual(normalized, preferences);
+    const hasThemeChanged = draftThemeId !== themeId;
+
     setPreferences(normalized);
     setDraftPreferences(normalized);
+    setThemeId(draftThemeId);
+    setDraftThemeId(draftThemeId);
     setShowSettings(false);
+
+    if (!hasDominantHandChanged && !hasPreferencesChanged && !hasThemeChanged) {
+      setIsSettingsDirty(false);
+      setDataSyncError(null);
+      return;
+    }
+
     try {
-      if (draftDominantHand !== dominantHand) {
+      if (hasDominantHandChanged) {
         await setDominantHandMutation({ dominantHand: draftDominantHand });
         setDominantHand(draftDominantHand);
       }
-      await savePreferencesMutation({ preferences: normalized });
+      if (hasPreferencesChanged || hasThemeChanged) {
+        await savePreferencesMutation({ preferences: normalized, theme: draftThemeId });
+      }
+      setIsSettingsDirty(false);
       setDataSyncError(null);
     } catch (error) {
-      setDataSyncError(mapAppError(error, "Nie udało się zapisać ustawień."));
+      console.error("Background settings sync failed on close", error);
+      setDataSyncError(null);
     }
   };
 
   const handleResetPreferences = () => {
+    setIsSettingsDirty(true);
     setDraftPreferences(defaultMeasurementPreferences);
   };
 
@@ -2726,6 +3252,13 @@ const BloodPressureApp: React.FC = () => {
   const getPulseCategory = (pulseValue: number) => classifyPulse(pulseValue, preferences.pulse);
 
   const handleAddReading = async () => {
+    const now = new Date();
+    if (readingDate.getTime() > now.getTime()) {
+      setReadingDate(now);
+      setDataSyncError("Data pomiaru nie może być w przyszłości.");
+      return;
+    }
+
     try {
       await addReadingMutation({
         systolic,
@@ -2751,13 +3284,13 @@ const BloodPressureApp: React.FC = () => {
         setShowSuccess(false);
         setCurrentTab("dashboard");
         setNote("");
-        setSystolic(120);
-        setDiastolic(80);
-        setPulse(72);
+        setSystolic(ADD_DEFAULTS.systolic);
+        setDiastolic(ADD_DEFAULTS.diastolic);
+        setPulse(ADD_DEFAULTS.pulse);
         setEnableSecondArm(false);
-        setSecondArmSystolic(120);
-        setSecondArmDiastolic(80);
-        setSecondArmPulse(72);
+        setSecondArmSystolic(ADD_DEFAULTS.systolic);
+        setSecondArmDiastolic(ADD_DEFAULTS.diastolic);
+        setSecondArmPulse(ADD_DEFAULTS.pulse);
         setReadingDate(new Date());
       }, 1500);
     } catch (error) {
@@ -2906,6 +3439,36 @@ const BloodPressureApp: React.FC = () => {
       .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
   }, [userData?.readings, preferredMeasurementArm]);
 
+  const addMeasurementPrefill = useMemo(
+    () => getAddMeasurementPrefill(readings, new Date()),
+    [readings],
+  );
+  const previousTabRef = useRef<AppTab>(currentTab);
+
+  useEffect(() => {
+    const previousTab = previousTabRef.current;
+    const shouldApplyOnTabEnter = currentTab === "add" && previousTab !== "add";
+    const shouldApplyAfterDataLoad =
+      currentTab === "add" &&
+      previousTab === "add" &&
+      addMeasurementPrefill.source !== "default" &&
+      readings.length > 0 &&
+      systolic === ADD_DEFAULTS.systolic &&
+      diastolic === ADD_DEFAULTS.diastolic &&
+      pulse === ADD_DEFAULTS.pulse;
+
+    if (shouldApplyOnTabEnter || shouldApplyAfterDataLoad) {
+      setSystolic(addMeasurementPrefill.systolic);
+      setDiastolic(addMeasurementPrefill.diastolic);
+      setPulse(addMeasurementPrefill.pulse);
+      setSecondArmSystolic(addMeasurementPrefill.systolic);
+      setSecondArmDiastolic(addMeasurementPrefill.diastolic);
+      setSecondArmPulse(addMeasurementPrefill.pulse);
+      setReadingDate(new Date());
+    }
+    previousTabRef.current = currentTab;
+  }, [currentTab, addMeasurementPrefill, readings.length, systolic, diastolic, pulse]);
+
   // Load preferences from user data
   useEffect(() => {
     const nextDominant = normalizeArmSide(userData?.dominantHand, "right");
@@ -2919,6 +3482,12 @@ const BloodPressureApp: React.FC = () => {
       });
       setPreferences(prefs);
       setDraftPreferences(prefs);
+
+      const nextThemeRaw = (userData.preferences as { theme?: unknown }).theme;
+      if (isAppThemeId(nextThemeRaw)) {
+        setThemeId(nextThemeRaw);
+        setDraftThemeId(nextThemeRaw);
+      }
     }
   }, [userData?.preferences, userData?.dominantHand]);
 
@@ -2939,7 +3508,7 @@ const BloodPressureApp: React.FC = () => {
     [filteredReadings],
   );
 
-  const chartData = useMemo(() => {
+  const chartData = useMemo<PressureChartPoint[]>(() => {
     const dailyMap = new Map<number, { sysSum: number; diaSum: number; pulseSum: number; count: number }>();
 
     for (const row of filteredDisplayReadings) {
@@ -2980,6 +3549,17 @@ const BloodPressureApp: React.FC = () => {
     return points.slice(-maxPoints[timeRange]);
   }, [filteredDisplayReadings, timeRange]);
 
+  const handleMobileChartTouchUpdate = (nextState: ChartInteractionState) => {
+    if (!isCoarsePointer) return;
+    const activeIndex = getTooltipIndexFromInteraction(nextState, chartData.length);
+    setIsMobileChartTooltipVisible(nextState.isTooltipActive && activeIndex !== null);
+  };
+
+  const handleMobileChartTouchRelease = () => {
+    if (!isCoarsePointer) return;
+    setIsMobileChartTooltipVisible(false);
+  };
+
   const stats = useMemo(() => {
     if (filteredDisplayReadings.length === 0) return null;
 
@@ -2992,22 +3572,120 @@ const BloodPressureApp: React.FC = () => {
     const avgPulse = Math.round(
       filteredDisplayReadings.reduce((sum, row) => sum + row.pulse, 0) / filteredDisplayReadings.length,
     );
-    const normalCount = filteredDisplayReadings.filter(
-      (row) => classifyPressure(row.systolic, row.diastolic, preferences.pressure) === "normal"
-    ).length;
-    const normalPercent = Math.round((normalCount / filteredDisplayReadings.length) * 100);
+    const goodCount = filteredDisplayReadings.filter((row) => {
+      const category = classifyPressure(row.systolic, row.diastolic, preferences.pressure);
+      return category === "normal" || category === "elevated";
+    }).length;
+    const normalPercent = Math.round((goodCount / filteredDisplayReadings.length) * 100);
 
     return { avgSys, avgDia, avgPulse, normalPercent };
   }, [filteredDisplayReadings, preferences.pressure]);
 
-  const analyticsYDomain: [number, number] = [PRESSURE_RULES.chartMin, PRESSURE_RULES.chartMax];
-  const pressureZones: Array<{ key: string; y1: number; y2: number; fill: string }> = [
-    { key: "normal", y1: preferences.pressure.lowDia, y2: preferences.pressure.elevatedSys - 1, fill: "rgba(48, 209, 88, 0.08)" },
-    { key: "high2", y1: preferences.pressure.high2Sys, y2: PRESSURE_RULES.chartMax, fill: "rgba(255, 69, 58, 0.10)" },
-  ];
+  const analyticsYDomain = useMemo<[number, number]>(() => {
+    if (chartData.length === 0) {
+      return [PRESSURE_RULES.chartMin, PRESSURE_RULES.chartMax];
+    }
+
+    const values = chartData.flatMap((point) => [point.sys, point.dia]);
+    const rawMin = Math.min(...values);
+    const rawMax = Math.max(...values);
+    const dynamicPadding = Math.max(10, Math.ceil((rawMax - rawMin) * 0.28));
+
+    let domainMin = Math.floor((rawMin - dynamicPadding) / 5) * 5;
+    let domainMax = Math.ceil((rawMax + dynamicPadding) / 5) * 5;
+
+    const minRange = 55;
+    if (domainMax - domainMin < minRange) {
+      const center = (domainMin + domainMax) / 2;
+      domainMin = Math.floor((center - minRange / 2) / 5) * 5;
+      domainMax = Math.ceil((center + minRange / 2) / 5) * 5;
+    }
+
+    domainMin = Math.max(PRESSURE_RULES.chartMin, domainMin);
+    domainMax = Math.min(PRESSURE_RULES.chartMax, domainMax);
+
+    if (domainMax <= domainMin) {
+      return [PRESSURE_RULES.chartMin, PRESSURE_RULES.chartMax];
+    }
+
+    return [domainMin, domainMax];
+  }, [chartData]);
+
+  const xAxisTickInterval = useMemo(() => {
+    if (chartData.length <= 7) return 0;
+    const maxLabels = isCoarsePointer ? 4 : 6;
+    return Math.max(1, Math.ceil(chartData.length / maxLabels) - 1);
+  }, [chartData.length, isCoarsePointer]);
+  const normalDiaStart = Math.max(preferences.pressure.lowDia + 1, preferences.pressure.high1Dia - 5);
+  const sysTunnelRange = useMemo(() => {
+    return {
+      y1: Math.max(analyticsYDomain[0], preferences.pressure.elevatedSys),
+      y2: Math.min(analyticsYDomain[1], preferences.pressure.high2Sys - 1),
+    };
+  }, [analyticsYDomain, preferences.pressure.elevatedSys, preferences.pressure.high2Sys]);
+  const diaTunnelRange = useMemo(() => {
+    return {
+      y1: Math.max(analyticsYDomain[0], normalDiaStart),
+      y2: Math.min(analyticsYDomain[1], preferences.pressure.high2Dia - 1),
+    };
+  }, [analyticsYDomain, normalDiaStart, preferences.pressure.high2Dia]);
   const chartTooltipTrigger: "hover" | "click" = "hover";
+  const chartTooltipActive = isCoarsePointer ? isMobileChartTooltipVisible : undefined;
+  const chartAxisColor = isActiveThemeLight ? "rgba(18,18,18,0.46)" : "rgba(255,255,255,0.30)";
+  const chartGridColor = isActiveThemeLight ? "rgba(0,0,0,0.12)" : "rgba(255,255,255,0.06)";
+  const chartCursorColor = isActiveThemeLight ? "rgba(0,0,0,0.22)" : "rgba(255,255,255,0.26)";
+  const chartDateTickColor = isActiveThemeLight ? "rgba(22,22,22,0.50)" : "rgba(255,255,255,0.30)";
+  const chartDotBorderColor = isActiveThemeLight ? "rgba(255,255,255,0.92)" : "#FFFFFF";
+  const chartTooltipCursor = isCoarsePointer
+    ? (isMobileChartTooltipVisible ? { stroke: chartCursorColor, strokeDasharray: "4 4" } : false)
+    : { stroke: chartCursorColor, strokeDasharray: "4 4" };
   const chartDotRadius = isCoarsePointer ? 7 : 4;
   const chartActiveDotRadius = isCoarsePointer ? 11 : 7;
+  const renderChartDateTick = useCallback(
+    (props: any) => {
+      const x = Number(props?.x ?? 0);
+      const y = Number(props?.y ?? 0);
+      const label = String(props.payload?.value ?? "").slice(0, 5);
+      const index = props.index ?? 0;
+      const lastIndex = Math.max(0, chartData.length - 1);
+      const anchor = index === 0 ? "start" : index === lastIndex ? "end" : "middle";
+
+      return (
+        <text x={x} y={y + 16} fill={chartDateTickColor} fontSize={11} textAnchor={anchor}>
+          {label}
+        </text>
+      );
+    },
+    [chartData.length, chartDateTickColor],
+  );
+  const renderPressureDot = useCallback(
+    (color: string, radius: number) =>
+      (props: any) => {
+        const cx = Number(props?.cx ?? 0);
+        const cy = Number(props?.cy ?? 0);
+        const index = Number(props?.index ?? 0);
+        const isLast = index === Math.max(0, chartData.length - 1);
+        const x = cx + (isLast ? -4 : 0);
+        return <circle cx={x} cy={cy} r={radius} fill={color} stroke={chartDotBorderColor} strokeWidth={2} />;
+      },
+    [chartData.length, chartDotBorderColor],
+  );
+  const renderSysDot = useMemo(
+    () => renderPressureDot("var(--theme-chart-sys)", chartDotRadius),
+    [renderPressureDot, chartDotRadius],
+  );
+  const renderDiaDot = useMemo(
+    () => renderPressureDot("var(--theme-chart-dia)", chartDotRadius),
+    [renderPressureDot, chartDotRadius],
+  );
+  const renderSysActiveDot = useMemo(
+    () => renderPressureDot("var(--theme-chart-sys)", chartActiveDotRadius),
+    [renderPressureDot, chartActiveDotRadius],
+  );
+  const renderDiaActiveDot = useMemo(
+    () => renderPressureDot("var(--theme-chart-dia)", chartActiveDotRadius),
+    [renderPressureDot, chartActiveDotRadius],
+  );
 
   const latestReading = readings[0] ?? null;
   const latestDisplayValues = latestReading ? getDisplayReadingValues(latestReading) : null;
@@ -3025,10 +3703,18 @@ const BloodPressureApp: React.FC = () => {
     [userData?.name, userData?.loginCount],
   );
   const isUserDataLoading = isAuthenticated && userData === undefined;
+  useEffect(() => {
+    if (!isCoarsePointer || currentTab !== "analytics") {
+      setIsMobileChartTooltipVisible(false);
+    }
+  }, [isCoarsePointer, currentTab, timeRange]);
 
   if (isAuthLoading) {
     return (
-      <div className="h-[100dvh] flex items-center justify-center" style={{ backgroundColor: "#0A0A0A" }}>
+      <div
+        className={`h-[100dvh] flex items-center justify-center ${isActiveThemeLight ? "theme-mono-light" : ""}`}
+        style={{ ...themeCssVars, backgroundColor: "var(--theme-bg)" }}
+      >
         <div className="w-full max-w-[430px] px-6 space-y-4">
           <SkeletonBar className="h-9 w-48" />
           <SkeletonBar className="h-28 w-full" />
@@ -3040,14 +3726,18 @@ const BloodPressureApp: React.FC = () => {
 
   // Show auth screen if not authenticated
   if (!isAuthenticated) {
-    return <AuthScreen view={authView} onChangeView={setAuthView} />;
+    return <AuthScreen view={authView} onChangeView={setAuthView} theme={currentTheme} />;
   }
 
   return (
     <div
       ref={appScrollRef}
-      className="h-[100dvh] overflow-y-auto overscroll-none touch-pan-y pb-32 relative"
-      style={{ backgroundColor: "#0A0A0A", fontFamily: "-apple-system, SF Pro Display, system-ui" }}
+      className={`h-[100dvh] overflow-y-auto overscroll-none touch-pan-y pb-32 relative ${isActiveThemeLight ? "theme-mono-light" : ""}`}
+      style={{
+        ...themeCssVars,
+        backgroundColor: "var(--theme-bg)",
+        fontFamily: "-apple-system, SF Pro Display, system-ui",
+      }}
     >
       <BackgroundPaths />
 
@@ -3057,9 +3747,9 @@ const BloodPressureApp: React.FC = () => {
             <div className="animate-scale-in">
               <div
                 className="w-24 h-24 rounded-full flex items-center justify-center"
-                style={{ background: "rgba(48, 209, 88, 0.30)", backdropFilter: "blur(24px)" }}
+                style={{ background: "var(--theme-success-soft)", backdropFilter: "blur(24px)" }}
               >
-                <Check className="w-12 h-12" style={{ color: "#30D158", strokeWidth: 3 }} />
+                <Check className="w-12 h-12" style={{ color: "var(--theme-success)", strokeWidth: 3 }} />
               </div>
             </div>
           </div>
@@ -3067,11 +3757,18 @@ const BloodPressureApp: React.FC = () => {
 
         {dataSyncError && (
           <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 px-3 w-full max-w-[420px]">
-            <div className="rounded-2xl border border-[#FF9F0A]/35 bg-[#FF9F0A]/12 text-[#FFD6A3] text-sm px-4 py-3 flex items-start justify-between gap-3">
+            <div
+              className="rounded-2xl border text-sm px-4 py-3 flex items-start justify-between gap-3"
+              style={{
+                borderColor: "var(--theme-warning-border)",
+                background: "var(--theme-warning-soft)",
+                color: "var(--theme-warning)",
+              }}
+            >
               <span>{dataSyncError}</span>
               <button
                 type="button"
-                className="text-[#FFD6A3]/75 hover:text-[#FFD6A3]"
+                className="opacity-75 hover:opacity-100"
                 onClick={() => setDataSyncError(null)}
                 aria-label="Zamknij komunikat"
               >
@@ -3127,12 +3824,29 @@ const BloodPressureApp: React.FC = () => {
                           <button
                             key={hand}
                             type="button"
-                            onClick={() => setDraftDominantHand(hand)}
+                            onClick={() => {
+                              if (draftDominantHand !== hand) {
+                                setIsSettingsDirty(true);
+                                setDraftDominantHand(hand);
+                              }
+                            }}
                             className="h-11 rounded-xl border text-sm font-medium transition-colors"
                             style={{
-                              borderColor: isSelected ? "rgba(10,132,255,0.75)" : "rgba(255,255,255,0.12)",
-                              background: isSelected ? "rgba(10,132,255,0.22)" : "rgba(255,255,255,0.04)",
-                              color: isSelected ? "#BFDFFF" : "rgba(255,255,255,0.78)",
+                              borderColor: isSelected
+                                ? "var(--theme-accent-border)"
+                                : isActiveThemeLight
+                                  ? "rgba(0,0,0,0.16)"
+                                  : "rgba(255,255,255,0.12)",
+                              background: isSelected
+                                ? "var(--theme-accent-soft)"
+                                : isActiveThemeLight
+                                  ? "rgba(0,0,0,0.04)"
+                                  : "rgba(255,255,255,0.04)",
+                              color: isSelected
+                                ? "var(--theme-accent-muted)"
+                                : isActiveThemeLight
+                                  ? "rgba(22,22,22,0.78)"
+                                  : "rgba(255,255,255,0.78)",
                             }}
                           >
                             {hand === "right" ? "Praworęczny/a" : "Leworęczny/a"}
@@ -3167,35 +3881,35 @@ const BloodPressureApp: React.FC = () => {
                         }
                       />
                       <SettingsField
-                        label="Norma SYS do (<)"
+                        label="Prawidłowe SYS od (>=)"
                         value={draftPreferences.pressure.elevatedSys}
                         onChange={(next) =>
                           updatePressureDraft("elevatedSys", numberFromInput(next, draftPreferences.pressure.elevatedSys))
                         }
                       />
                       <SettingsField
-                        label="Nadciśnienie I SYS od (>=)"
+                        label="Wysokie prawidłowe SYS od (>=)"
                         value={draftPreferences.pressure.high1Sys}
                         onChange={(next) =>
                           updatePressureDraft("high1Sys", numberFromInput(next, draftPreferences.pressure.high1Sys))
                         }
                       />
                       <SettingsField
-                        label="Nadciśnienie I DIA od (>=)"
+                        label="Wysokie prawidłowe DIA od (>=)"
                         value={draftPreferences.pressure.high1Dia}
                         onChange={(next) =>
                           updatePressureDraft("high1Dia", numberFromInput(next, draftPreferences.pressure.high1Dia))
                         }
                       />
                       <SettingsField
-                        label="Nadciśnienie II SYS od (>=)"
+                        label="Nadciśnienie SYS od (>=)"
                         value={draftPreferences.pressure.high2Sys}
                         onChange={(next) =>
                           updatePressureDraft("high2Sys", numberFromInput(next, draftPreferences.pressure.high2Sys))
                         }
                       />
                       <SettingsField
-                        label="Nadciśnienie II DIA od (>=)"
+                        label="Nadciśnienie DIA od (>=)"
                         value={draftPreferences.pressure.high2Dia}
                         onChange={(next) =>
                           updatePressureDraft("high2Dia", numberFromInput(next, draftPreferences.pressure.high2Dia))
@@ -3241,6 +3955,95 @@ const BloodPressureApp: React.FC = () => {
                       />
                     </div>
                   </SettingsSection>
+
+                  <section
+                    className="rounded-2xl border p-4 space-y-3.5"
+                    style={{
+                      borderColor: isActiveThemeLight ? "rgba(0,0,0,0.12)" : "rgba(255,255,255,0.10)",
+                      background: isActiveThemeLight ? "rgba(255,255,255,0.42)" : "rgba(255,255,255,0.02)",
+                      boxShadow: isActiveThemeLight ? "0 10px 18px rgba(0,0,0,0.08), inset 0 1px 0 rgba(255,255,255,0.72)" : undefined,
+                    }}
+                  >
+                    <div>
+                      <p className="text-white text-lg font-semibold leading-tight">Motyw aplikacji</p>
+                      <p className="text-white/45 text-xs mt-1">Wybierz wariant kolorystyczny interfejsu</p>
+                    </div>
+
+                    <div
+                      className="rounded-2xl p-1.5"
+                      style={{
+                        border: isActiveThemeLight ? "1px solid rgba(0,0,0,0.10)" : "1px solid rgba(255,255,255,0.08)",
+                        background: isActiveThemeLight ? "rgba(0,0,0,0.035)" : "rgba(255,255,255,0.03)",
+                        boxShadow: isActiveThemeLight ? "inset 0 1px 0 rgba(255,255,255,0.62)" : undefined,
+                      }}
+                    >
+                      <div className="grid grid-cols-5 gap-2">
+                        {THEME_IDS.map((themeOptionId) => {
+                          const palette = APP_THEME_PALETTES[themeOptionId];
+                          const isSelected = draftThemeId === themeOptionId;
+
+                          return (
+                            <button
+                              key={themeOptionId}
+                              type="button"
+                              onClick={() => {
+                                if (draftThemeId !== themeOptionId) {
+                                  setIsSettingsDirty(true);
+                                  setDraftThemeId(themeOptionId);
+                                }
+                              }}
+                              aria-label={`Motyw ${palette.label}`}
+                              className="relative h-12 rounded-xl border transition-all duration-200 ease-out hover:-translate-y-[1px] active:scale-[0.98]"
+                              style={{
+                                borderColor: isSelected
+                                  ? isActiveThemeLight
+                                    ? "rgba(0,0,0,0.55)"
+                                    : "var(--theme-accent-border)"
+                                  : isActiveThemeLight
+                                    ? "rgba(0,0,0,0.18)"
+                                    : "rgba(255,255,255,0.16)",
+                                background: isActiveThemeLight
+                                  ? "linear-gradient(135deg, rgba(255,255,255,0.92), rgba(245,245,245,0.86))"
+                                  : "linear-gradient(135deg, rgba(255,255,255,0.08), rgba(255,255,255,0.02))",
+                                boxShadow: isSelected
+                                  ? isActiveThemeLight
+                                    ? "0 0 0 2px rgba(0,0,0,0.11), 0 10px 18px rgba(0,0,0,0.18), inset 0 1px 0 rgba(255,255,255,0.85)"
+                                    : "0 0 0 2px var(--theme-accent-soft), 0 8px 14px rgba(0,0,0,0.32)"
+                                  : isActiveThemeLight
+                                    ? "0 2px 6px rgba(0,0,0,0.10), inset 0 1px 0 rgba(255,255,255,0.78)"
+                                    : "inset 0 1px 0 rgba(255,255,255,0.08)",
+                              }}
+                            >
+                              <span
+                                className="absolute inset-[4px] rounded-[9px]"
+                                style={{
+                                  background: `linear-gradient(135deg, ${palette.swatchA} 0%, ${palette.swatchA} 48%, ${palette.swatchB} 52%, ${palette.swatchB} 100%)`,
+                                  boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.18)",
+                                }}
+                              />
+
+                              {isSelected && (
+                                <span
+                                  className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full"
+                                  style={{
+                                    background: isActiveThemeLight ? "#1f1f1f" : "var(--theme-accent)",
+                                    border: isActiveThemeLight
+                                      ? "1px solid rgba(255,255,255,0.68)"
+                                      : "1px solid rgba(0,0,0,0.22)",
+                                  }}
+                                >
+                                  <Check
+                                    className="w-2.5 h-2.5"
+                                    style={{ color: isActiveThemeLight ? "#F5F5F5" : "#FFFFFF", strokeWidth: 3 }}
+                                  />
+                                </span>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </section>
 
                   <div className="pt-1 flex flex-col items-center gap-3">
                     <div className="w-full max-w-[280px]">
@@ -3300,7 +4103,12 @@ const BloodPressureApp: React.FC = () => {
                     onClick={() => {
                       void handleConfirmDeleteReading();
                     }}
-                    className="h-11 rounded-xl border border-[#FF453A]/50 bg-[#FF453A]/20 text-[#FFB4AF] hover:bg-[#FF453A]/30 transition-colors"
+                    className="h-11 rounded-xl border transition-colors"
+                    style={{
+                      borderColor: "var(--theme-danger-border)",
+                      background: "var(--theme-danger-soft)",
+                      color: "var(--theme-danger)",
+                    }}
                     disabled={isDeletingReading}
                   >
                     {isDeletingReading ? "Usuwanie..." : "Usuń"}
@@ -3360,7 +4168,12 @@ const BloodPressureApp: React.FC = () => {
                     onClick={() => {
                       void handleChangePassword();
                     }}
-                    className="h-11 rounded-xl border border-[#0A84FF]/40 bg-[#0A84FF]/20 text-[#B7D8FF] hover:bg-[#0A84FF]/30 transition-colors"
+                    className="h-11 rounded-xl border transition-colors"
+                    style={{
+                      borderColor: "var(--theme-accent-border)",
+                      background: "var(--theme-accent-soft)",
+                      color: "var(--theme-accent-muted)",
+                    }}
                     disabled={isChangingPassword}
                   >
                     {isChangingPassword ? "Zmiana..." : "Zmień"}
@@ -3420,7 +4233,12 @@ const BloodPressureApp: React.FC = () => {
                     onClick={() => {
                       void handleExportData("pdf");
                     }}
-                    className="h-11 rounded-xl border border-[#0A84FF]/40 bg-[#0A84FF]/20 text-[#B7D8FF] hover:bg-[#0A84FF]/30 transition-colors disabled:opacity-45 disabled:cursor-not-allowed"
+                    className="h-11 rounded-xl border transition-colors disabled:opacity-45 disabled:cursor-not-allowed"
+                    style={{
+                      borderColor: "var(--theme-accent-border)",
+                      background: "var(--theme-accent-soft)",
+                      color: "var(--theme-accent-muted)",
+                    }}
                     disabled={isExporting}
                   >
                     {isExporting ? "Tworzenie..." : "Eksport PDF"}
@@ -3446,7 +4264,9 @@ const BloodPressureApp: React.FC = () => {
           >
             <div className="w-full max-w-md" onClick={(event) => event.stopPropagation()}>
               <GlassCard className="p-5 space-y-4">
-                <h3 className="text-[#FFB4AF] text-lg font-semibold">Usuń konto</h3>
+                <h3 className="text-lg font-semibold" style={{ color: "var(--theme-danger)" }}>
+                  Usuń konto
+                </h3>
                 <p className="text-white/70 text-sm">
                   Usuniemy Twoje konto i wszystkie pomiary. Tej operacji nie da się cofnąć.
                 </p>
@@ -3473,7 +4293,12 @@ const BloodPressureApp: React.FC = () => {
                     onClick={() => {
                       void handleDeleteAccount();
                     }}
-                    className="h-11 rounded-xl border border-[#FF453A]/50 bg-[#FF453A]/20 text-[#FFB4AF] hover:bg-[#FF453A]/30 transition-colors"
+                    className="h-11 rounded-xl border transition-colors"
+                    style={{
+                      borderColor: "var(--theme-danger-border)",
+                      background: "var(--theme-danger-soft)",
+                      color: "var(--theme-danger)",
+                    }}
                     disabled={isDeletingAccount}
                   >
                     {isDeletingAccount ? "Usuwanie..." : "Usuń konto"}
@@ -3492,7 +4317,10 @@ const BloodPressureApp: React.FC = () => {
                 <p className="text-white/55 text-base">{formatDate(localNow)}</p>
               </div>
               <button
-                onClick={() => setShowSettings(true)}
+                onClick={() => {
+                  setDataSyncError(null);
+                  setShowSettings(true);
+                }}
                 className="w-11 h-11 rounded-2xl border border-white/10 bg-white/5 hover:bg-white/10 transition-colors flex items-center justify-center shrink-0"
                 aria-label="Otwórz ustawienia użytkownika"
               >
@@ -3510,13 +4338,16 @@ const BloodPressureApp: React.FC = () => {
               <>
                 <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 flex items-center justify-between">
                   <div className="flex items-center gap-2.5">
-                    <img
-                      src={streakGraphic.src}
-                      alt={streakGraphic.alt}
-                      className="w-10 h-10 object-contain"
-                      loading="lazy"
-                      decoding="async"
-                    />
+                    <span className="inline-flex items-center justify-center" role="img" aria-label={streakGraphic.alt}>
+                      <streakGraphic.icon
+                        className="w-7 h-7 shrink-0"
+                        strokeWidth={2.2}
+                        style={{
+                          color: streakGraphic.color,
+                          filter: `drop-shadow(0 0 12px ${streakGraphic.glow})`,
+                        }}
+                      />
+                    </span>
                     <div>
                       <p className="text-white text-sm font-medium">Passa</p>
                       <p className="text-white/45 text-xs">rekord: {formatDaysLabel(streak.best)}</p>
@@ -3594,9 +4425,9 @@ const BloodPressureApp: React.FC = () => {
               <h2 className="text-white text-2xl font-bold mb-6 text-center">Nowy pomiar</h2>
               <p className="mb-4 text-center text-xs text-white/35">{getArmLabel(preferredMeasurementArm)}</p>
               <div className="flex justify-center gap-2 mb-6 w-full max-w-[320px] mx-auto">
-                <ScrollPicker value={systolic} onChange={setSystolic} min={60} max={250} label="SYS" />
-                <ScrollPicker value={diastolic} onChange={setDiastolic} min={40} max={150} label="DIA" />
-                <ScrollPicker value={pulse} onChange={setPulse} min={30} max={200} label="PULS" />
+                <ScrollPicker value={systolic} onChange={setSystolic} min={60} max={250} label="SYS" isLightTheme={isActiveThemeLight} />
+                <ScrollPicker value={diastolic} onChange={setDiastolic} min={40} max={150} label="DIA" isLightTheme={isActiveThemeLight} />
+                <ScrollPicker value={pulse} onChange={setPulse} min={30} max={200} label="PULS" isLightTheme={isActiveThemeLight} />
               </div>
 
               <button
@@ -3604,9 +4435,21 @@ const BloodPressureApp: React.FC = () => {
                 onClick={() => setEnableSecondArm((prev) => !prev)}
                 className="w-full h-11 rounded-xl border text-sm font-medium transition-colors"
                 style={{
-                  borderColor: enableSecondArm ? "rgba(10,132,255,0.75)" : "rgba(255,255,255,0.12)",
-                  background: enableSecondArm ? "rgba(10,132,255,0.22)" : "rgba(255,255,255,0.04)",
-                  color: enableSecondArm ? "#BFDFFF" : "rgba(255,255,255,0.78)",
+                  borderColor: enableSecondArm
+                    ? "var(--theme-accent-border)"
+                    : isActiveThemeLight
+                      ? "rgba(0,0,0,0.16)"
+                      : "rgba(255,255,255,0.12)",
+                  background: enableSecondArm
+                    ? "var(--theme-accent-soft)"
+                    : isActiveThemeLight
+                      ? "rgba(0,0,0,0.04)"
+                      : "rgba(255,255,255,0.04)",
+                  color: enableSecondArm
+                    ? "var(--theme-accent-muted)"
+                    : isActiveThemeLight
+                      ? "rgba(22,22,22,0.78)"
+                      : "rgba(255,255,255,0.78)",
                 }}
               >
                 {enableSecondArm ? "Usuń drugi pomiar ręki" : "Dodaj pomiar drugiej ręki (opcjonalnie)"}
@@ -3616,9 +4459,30 @@ const BloodPressureApp: React.FC = () => {
                 <div className="mt-5">
                   <p className="mb-4 text-center text-xs text-white/35">{getArmLabel(secondaryMeasurementArm)}</p>
                   <div className="flex justify-center gap-2 w-full max-w-[320px] mx-auto">
-                    <ScrollPicker value={secondArmSystolic} onChange={setSecondArmSystolic} min={60} max={250} label="SYS" />
-                    <ScrollPicker value={secondArmDiastolic} onChange={setSecondArmDiastolic} min={40} max={150} label="DIA" />
-                    <ScrollPicker value={secondArmPulse} onChange={setSecondArmPulse} min={30} max={200} label="PULS" />
+                    <ScrollPicker
+                      value={secondArmSystolic}
+                      onChange={setSecondArmSystolic}
+                      min={60}
+                      max={250}
+                      label="SYS"
+                      isLightTheme={isActiveThemeLight}
+                    />
+                    <ScrollPicker
+                      value={secondArmDiastolic}
+                      onChange={setSecondArmDiastolic}
+                      min={40}
+                      max={150}
+                      label="DIA"
+                      isLightTheme={isActiveThemeLight}
+                    />
+                    <ScrollPicker
+                      value={secondArmPulse}
+                      onChange={setSecondArmPulse}
+                      min={30}
+                      max={200}
+                      label="PULS"
+                      isLightTheme={isActiveThemeLight}
+                    />
                   </div>
                 </div>
               )}
@@ -3667,7 +4531,8 @@ const BloodPressureApp: React.FC = () => {
                   <p className="text-white/70 text-base font-medium">Brak pomiarów.</p>
                   <button
                     type="button"
-                    className="mt-3 text-[#7AB8FF] text-sm hover:text-[#A5CDFF] transition-colors"
+                    className="mt-3 text-sm transition-colors opacity-90 hover:opacity-100"
+                    style={{ color: "var(--theme-info)" }}
                     onClick={() => setCurrentTab("add")}
                   >
                     Dodaj pierwszy pomiar →
@@ -3688,6 +4553,18 @@ const BloodPressureApp: React.FC = () => {
                   ? Math.round((reading.pulse + secondArm.pulse) / 2)
                   : reading.pulse;
                 const displayPulseCategory = getPulseCategory(displayPulse);
+                const pulseValueColor =
+                  displayPulseCategory === "normal"
+                    ? isActiveThemeLight
+                      ? "rgba(18,18,18,0.66)"
+                      : "rgba(255,255,255,0.66)"
+                    : getPulseCategoryColor(displayPulseCategory);
+                const pulseLabelColor =
+                  displayPulseCategory === "normal"
+                    ? isActiveThemeLight
+                      ? "rgba(18,18,18,0.52)"
+                      : "rgba(255,255,255,0.52)"
+                    : getPulseCategoryColor(displayPulseCategory);
                 const isExpanded = expandedHistoryReadingIds.has(reading.id);
                 const pressureCategory = getPressureCategory(displaySystolic, displayDiastolic);
                 const primaryArmLabel = getArmLabel(reading.arm);
@@ -3710,49 +4587,49 @@ const BloodPressureApp: React.FC = () => {
                     }}
                     disabled={isDeletingReading || pendingDeleteReadingId !== null}
                   >
-                    <GlassCard className="relative">
+                    <GlassCard className="relative p-5">
                       <div className="min-w-0">
-                        <div className="flex items-center justify-between gap-2 mb-2.5">
-                          <p className="text-white/55 text-xs sm:text-sm whitespace-nowrap">
+                        <div className="flex items-center justify-between gap-2 mb-3">
+                          <p className="text-white/42 text-xs sm:text-sm tracking-[0.01em] whitespace-nowrap">
                             {formatTime(reading.timestamp)} • {formatDate(reading.timestamp)}
                           </p>
                           {hasSecondArm && (
-                            <span className="rounded-full border border-white/15 bg-white/[0.05] px-2 py-0.5 text-[10px] text-white/65 tracking-wide">
+                            <span className="rounded-full border border-white/12 bg-white/[0.03] px-2 py-0.5 text-[10px] text-white/55 tracking-wide">
                               2 ręce
                             </span>
                           )}
                         </div>
-                        <div className="flex items-end gap-2 mb-2 flex-wrap">
-                          <span className="text-white text-3xl font-semibold tabular-nums leading-none">
+                        <div className="flex items-end gap-2 mb-2.5 flex-wrap">
+                          <span className="text-white text-[44px] font-bold tabular-nums leading-[0.92] tracking-[-0.02em]">
                             {formatValueOrDash(displaySystolic)}/{formatValueOrDash(displayDiastolic)}
                           </span>
                           <span
-                            className="text-2xl whitespace-nowrap tabular-nums leading-none"
-                            style={{ color: getPulseCategoryColor(displayPulseCategory) }}
+                            className="text-[36px] whitespace-nowrap tabular-nums leading-[0.94]"
+                            style={{ color: pulseValueColor }}
                           >
                             · {formatValueOrDash(displayPulse)} bpm
                           </span>
                         </div>
                         <div className="mb-2.5 flex items-center justify-between gap-3 flex-wrap">
-                          <p className="text-xs" style={{ color: getPulseCategoryColor(displayPulseCategory) }}>
+                          <p className="text-[11px] tracking-wide" style={{ color: pulseLabelColor }}>
                             {getPulseCategoryLabel(displayPulseCategory)}
                           </p>
-                          <div className="inline-flex items-center gap-1.5">
-                            <span className="text-[11px] tracking-wide text-white/45">Ciśnienie</span>
-                            <CategoryBadge category={pressureCategory} />
-                          </div>
+                          <CategoryBadge category={pressureCategory} />
                         </div>
 
                         {secondArm ? (
                           <>
                             <div className="mb-0.5 flex items-center justify-between gap-2">
-                              <p className="text-white/40 text-xs leading-5">
+                              <p className="text-white/34 text-xs leading-5">
                                 {primaryArmLabel} + {secondaryArmLabel}
                               </p>
                               <button
                                 type="button"
                                 onClick={() => toggleHistoryReadingDetails(reading.id)}
-                                className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-[#7AB8FF] hover:bg-white/[0.06] transition-colors"
+                                onPointerDown={(event) => event.stopPropagation()}
+                                data-no-swipe="true"
+                                className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] hover:bg-white/[0.05] transition-colors"
+                                style={{ color: "var(--theme-info)" }}
                                 aria-expanded={isExpanded}
                               >
                                 {isExpanded ? "Ukryj" : "Szczegóły"}
@@ -3763,12 +4640,12 @@ const BloodPressureApp: React.FC = () => {
                             </div>
 
                             {isExpanded && (
-                              <div className="space-y-1 mb-1">
-                                <p className="text-white/45 text-xs">
+                              <div className="space-y-1 mb-1.5">
+                                <p className="text-white/45 text-xs tracking-[0.01em]">
                                   {getArmLabel(reading.arm)}: {formatValueOrDash(reading.systolic)}/
                                   {formatValueOrDash(reading.diastolic)} • {formatValueOrDash(reading.pulse)} bpm
                                 </p>
-                                <p className="text-white/45 text-xs">
+                                <p className="text-white/45 text-xs tracking-[0.01em]">
                                   {getArmLabel(secondArm.arm)}: {formatValueOrDash(secondArm.systolic)}/
                                   {formatValueOrDash(secondArm.diastolic)} • {formatValueOrDash(secondArm.pulse)} bpm
                                 </p>
@@ -3776,10 +4653,10 @@ const BloodPressureApp: React.FC = () => {
                             )}
                           </>
                         ) : (
-                          <p className="text-white/40 text-xs mb-1">{getArmLabel(reading.arm)}</p>
+                          <p className="text-white/34 text-xs mb-1">{getArmLabel(reading.arm)}</p>
                         )}
 
-                        {reading.note && <p className="text-white/30 text-sm italic mt-2">{reading.note}</p>}
+                        {reading.note && <p className="text-white/32 text-xs mt-2">{reading.note}</p>}
                       </div>
                     </GlassCard>
                   </SwipeDeleteCard>
@@ -3800,9 +4677,9 @@ const BloodPressureApp: React.FC = () => {
                   onClick={() => setTimeRange(range)}
                   className="px-4 py-2 rounded-full text-sm font-medium transition-all"
                   style={{
-                    background: timeRange === range ? "#0A84FF" : "rgba(255, 255, 255, 0.06)",
-                    color: "#FFFFFF",
-                    border: `1px solid ${timeRange === range ? "#0A84FF" : "rgba(255, 255, 255, 0.10)"}`,
+                    background: timeRange === range ? "var(--theme-accent)" : isActiveThemeLight ? "rgba(0,0,0,0.05)" : "rgba(255, 255, 255, 0.06)",
+                    color: timeRange === range ? "var(--theme-on-accent)" : isActiveThemeLight ? "rgba(20,20,20,0.74)" : "#FFFFFF",
+                    border: `1px solid ${timeRange === range ? "var(--theme-accent)" : isActiveThemeLight ? "rgba(0,0,0,0.12)" : "rgba(255, 255, 255, 0.10)"}`,
                   }}
                 >
                   {range === "all" ? "Wszystko" : range}
@@ -3831,7 +4708,7 @@ const BloodPressureApp: React.FC = () => {
                     <p className="text-white text-3xl font-bold tabular-nums">{formatValueOrDash(stats.avgPulse)}</p>
                   </GlassCard>
                   <GlassCard>
-                    <p className="text-white/55 text-sm mb-2">% w normie</p>
+                    <p className="text-white/55 text-sm mb-2">% prawidłowych</p>
                     <p className="text-white text-3xl font-bold tabular-nums">{formatPercentOrDash(stats.normalPercent)}</p>
                   </GlassCard>
                 </div>
@@ -3840,66 +4717,118 @@ const BloodPressureApp: React.FC = () => {
                   <h3 className="text-white text-lg font-semibold mb-1">Wykres ciśnienia</h3>
                   {isCoarsePointer && (
                     <p className="text-white/55 text-xs mb-3">
-                      Dotknij i przytrzymaj punkt, aby podejrzeć dokładne wartości.
+                      Przytrzymaj punkt, aby zobaczyć szczegóły. Po puszczeniu podgląd znika.
                     </p>
                   )}
                   {filteredReadings.length <= 1 ? (
                     <p className="text-white/65 text-sm">Dodaj więcej pomiarów aby zobaczyć trend.</p>
                   ) : (
                     <ResponsiveContainer width="100%" height={isCoarsePointer ? 280 : 250}>
-                      <LineChart data={chartData} margin={{ top: 10, right: 6, left: -8, bottom: 2 }}>
-                        {pressureZones.map((zone) => (
-                          <ReferenceArea
-                            key={zone.key}
-                            y1={zone.y1}
-                            y2={zone.y2}
-                            fill={zone.fill}
-                            ifOverflow="extendDomain"
+                      <LineChart
+                        data={chartData}
+                        margin={{ top: 10, right: 16, left: 4, bottom: 8 }}
+                        style={isCoarsePointer ? { touchAction: "none" } : undefined}
+                        onTouchStart={handleMobileChartTouchUpdate}
+                        onTouchMove={handleMobileChartTouchUpdate}
+                        onTouchEnd={handleMobileChartTouchRelease}
+                      >
+                        <defs>
+                          <linearGradient id="sysTunnelGradient" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stopColor="var(--theme-chart-sys)" stopOpacity={0.05} />
+                            <stop offset="50%" stopColor="var(--theme-chart-sys)" stopOpacity={0.14} />
+                            <stop offset="100%" stopColor="var(--theme-chart-sys)" stopOpacity={0.05} />
+                          </linearGradient>
+                          <linearGradient id="diaTunnelGradient" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stopColor="var(--theme-chart-dia)" stopOpacity={0.05} />
+                            <stop offset="50%" stopColor="var(--theme-chart-dia)" stopOpacity={0.15} />
+                            <stop offset="100%" stopColor="var(--theme-chart-dia)" stopOpacity={0.05} />
+                          </linearGradient>
+                        </defs>
+                        {sysTunnelRange.y2 > sysTunnelRange.y1 && (
+                          <ReferenceArea y1={sysTunnelRange.y1} y2={sysTunnelRange.y2} fill="url(#sysTunnelGradient)" ifOverflow="hidden" />
+                        )}
+                        {diaTunnelRange.y2 > diaTunnelRange.y1 && (
+                          <ReferenceArea y1={diaTunnelRange.y1} y2={diaTunnelRange.y2} fill="url(#diaTunnelGradient)" ifOverflow="hidden" />
+                        )}
+                        {sysTunnelRange.y2 > sysTunnelRange.y1 && (
+                          <ReferenceLine
+                            y={sysTunnelRange.y1}
+                            stroke="var(--theme-chart-sys-soft)"
+                            strokeDasharray="5 5"
+                            ifOverflow="hidden"
                           />
-                        ))}
-                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-                        <XAxis dataKey="date" stroke="rgba(255,255,255,0.30)" style={{ fontSize: "11px" }} />
+                        )}
+                        {sysTunnelRange.y2 > sysTunnelRange.y1 && (
+                          <ReferenceLine
+                            y={sysTunnelRange.y2}
+                            stroke="var(--theme-chart-sys-soft)"
+                            strokeDasharray="5 5"
+                            ifOverflow="hidden"
+                          />
+                        )}
+                        {diaTunnelRange.y2 > diaTunnelRange.y1 && (
+                          <ReferenceLine
+                            y={diaTunnelRange.y1}
+                            stroke="var(--theme-chart-dia-soft)"
+                            strokeDasharray="5 5"
+                            ifOverflow="hidden"
+                          />
+                        )}
+                        {diaTunnelRange.y2 > diaTunnelRange.y1 && (
+                          <ReferenceLine
+                            y={diaTunnelRange.y2}
+                            stroke="var(--theme-chart-dia-soft)"
+                            strokeDasharray="5 5"
+                            ifOverflow="hidden"
+                          />
+                        )}
+                        <CartesianGrid strokeDasharray="3 3" stroke={chartGridColor} />
+                        <XAxis
+                          dataKey="date"
+                          stroke={chartAxisColor}
+                          interval={xAxisTickInterval}
+                          tickMargin={10}
+                          minTickGap={12}
+                          tick={renderChartDateTick}
+                        />
                         <YAxis
-                          stroke="rgba(255,255,255,0.30)"
+                          stroke={chartAxisColor}
                           style={{ fontSize: "12px" }}
+                          tick={{ fill: chartAxisColor }}
                           domain={analyticsYDomain}
+                          tickCount={6}
                         />
                         <Tooltip
                           trigger={chartTooltipTrigger}
+                          active={chartTooltipActive}
                           shared
-                          cursor={{ stroke: "rgba(255,255,255,0.26)", strokeDasharray: "4 4" }}
-                          content={<PressureTooltipCard pressurePrefs={preferences.pressure} isCoarsePointer={isCoarsePointer} />}
-                        />
-                        <ReferenceLine
-                          y={stats.avgSys}
-                          stroke="rgba(122,184,255,0.92)"
-                          strokeDasharray="6 6"
-                          ifOverflow="extendDomain"
-                        />
-                        <ReferenceLine
-                          y={stats.avgDia}
-                          stroke="rgba(255,180,84,0.92)"
-                          strokeDasharray="6 6"
-                          ifOverflow="extendDomain"
+                          cursor={chartTooltipCursor}
+                          content={
+                            <PressureTooltipCard
+                              pressurePrefs={preferences.pressure}
+                              isCoarsePointer={isCoarsePointer}
+                              isLightTheme={isActiveThemeLight}
+                            />
+                          }
                         />
                         <Line
                           type="monotone"
                           dataKey="sys"
                           name="SYS"
-                          stroke="#5AA8FF"
+                          stroke="var(--theme-chart-sys)"
                           strokeWidth={3}
-                          dot={{ fill: "#5AA8FF", strokeWidth: 2, stroke: "#FFFFFF", r: chartDotRadius }}
-                          activeDot={{ r: chartActiveDotRadius, strokeWidth: 2, stroke: "#FFFFFF", fill: "#5AA8FF" }}
-                          style={{ filter: "drop-shadow(0 0 8px rgba(90,168,255,0.85))" }}
+                          dot={renderSysDot}
+                          activeDot={renderSysActiveDot}
+                          style={{ filter: "drop-shadow(0 0 8px var(--theme-chart-sys-glow))" }}
                         />
                         <Line
                           type="monotone"
                           dataKey="dia"
                           name="DIA"
-                          stroke="#FFB454"
+                          stroke="var(--theme-chart-dia)"
                           strokeWidth={3}
-                          dot={{ fill: "#FFB454", strokeWidth: 2, stroke: "#FFFFFF", r: chartDotRadius }}
-                          activeDot={{ r: chartActiveDotRadius, strokeWidth: 2, stroke: "#FFFFFF", fill: "#FFB454" }}
+                          dot={renderDiaDot}
+                          activeDot={renderDiaActiveDot}
                         />
                       </LineChart>
                     </ResponsiveContainer>
@@ -3924,7 +4853,7 @@ const BloodPressureApp: React.FC = () => {
         >
           <InteractiveMenu
             items={menuItems}
-            accentColor="#0A84FF"
+            accentColor={currentTheme.accent}
             activeIndex={tabToIndex[currentTab]}
             onItemClick={handleTabChange}
           />
