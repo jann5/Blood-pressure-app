@@ -4011,7 +4011,7 @@ const BloodPressureApp: React.FC = () => {
                                   : isActiveThemeLight
                                     ? "rgba(0,0,0,0.18)"
                                     : "rgba(255,255,255,0.16)",
-                                background: `linear-gradient(135deg, ${palette.swatchA} 0%, ${palette.swatchA} 48%, ${palette.swatchB} 52%, ${palette.swatchB} 100%)`,
+                                background: palette.swatchA,
                                 boxShadow: isSelected
                                   ? isActiveThemeLight
                                     ? "0 0 0 2px rgba(0,0,0,0.12), 0 8px 14px rgba(0,0,0,0.16)"
@@ -4021,9 +4021,19 @@ const BloodPressureApp: React.FC = () => {
                                     : "0 2px 8px rgba(0,0,0,0.22)",
                               }}
                             >
+                              <span className="pointer-events-none absolute inset-0 overflow-hidden rounded-[inherit]">
+                                <span className="absolute inset-0" style={{ backgroundColor: palette.swatchA }} />
+                                <span
+                                  className="absolute inset-0"
+                                  style={{
+                                    backgroundColor: palette.swatchB,
+                                    clipPath: "polygon(100% 0, 100% 100%, 0 100%)",
+                                  }}
+                                />
+                              </span>
                               {isSelected && (
                                 <span
-                                  className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded-full"
+                                  className="absolute right-0.5 top-0.5 z-10 flex h-4 w-4 items-center justify-center rounded-full"
                                   style={{
                                     background: palette.accent,
                                     border: `1px solid ${withAlpha(palette.onAccent, 0.32, "rgba(0,0,0,0.22)")}`,
