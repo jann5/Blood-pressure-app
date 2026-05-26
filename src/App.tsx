@@ -3794,25 +3794,31 @@ const BloodPressureApp: React.FC = () => {
               void handleCloseSettings();
             }}
           >
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                void handleCloseSettings();
+              }}
+              className="absolute z-[60] w-10 h-10 rounded-xl border border-white/12 bg-white/10 hover:bg-white/15 transition-colors flex items-center justify-center text-white/80 hover:text-white"
+              style={{
+                top: "calc(env(safe-area-inset-top, 0px) + 12px)",
+                right: "calc(env(safe-area-inset-right, 0px) + 12px)",
+              }}
+              aria-label="Zamknij ustawienia"
+            >
+              <X className="w-5 h-5" />
+            </button>
             <div
               className="w-full max-w-md"
               onClick={(event) => event.stopPropagation()}
             >
               <GlassCard className="max-h-[82vh] overflow-y-auto p-0">
-                <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between">
+                <div className="px-5 py-4 border-b border-white/10">
                   <div>
                     <p className="text-white text-lg font-semibold">Ustawienia</p>
                     <p className="text-white/45 text-xs">Konto i preferencje użytkownika</p>
                   </div>
-                  <button
-                    onClick={() => {
-                      void handleCloseSettings();
-                    }}
-                    className="w-8 h-8 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 transition-colors flex items-center justify-center text-white/65 hover:text-white"
-                    aria-label="Zamknij ustawienia"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
                 </div>
 
                 <div className="px-5 py-5 space-y-5">
