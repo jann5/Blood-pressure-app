@@ -3799,7 +3799,6 @@ const BloodPressureApp: React.FC = () => {
 
         {showSettings && (
           <div
-            key={`settings-overlay-${activeThemeId}`}
             className="fixed inset-0 z-50 p-4 flex items-end sm:items-center justify-center"
             style={{
               backgroundColor: settingsOverlayTint,
