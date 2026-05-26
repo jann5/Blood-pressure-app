@@ -2814,7 +2814,7 @@ const BloodPressureApp: React.FC = () => {
     return window.matchMedia("(pointer: coarse)").matches;
   });
   const [isMobileChartTooltipVisible, setIsMobileChartTooltipVisible] = useState(false);
-  const activeThemeId = themeId;
+  const activeThemeId = showSettings ? draftThemeId : themeId;
   const isActiveThemeLight = isLightMonoTheme(activeThemeId);
   const currentTheme = APP_THEME_PALETTES[activeThemeId];
   const themeCssVars = useMemo(() => getThemeCssVars(currentTheme), [currentTheme]);
@@ -3999,7 +3999,6 @@ const BloodPressureApp: React.FC = () => {
                                 if (draftThemeId !== themeOptionId) {
                                   setIsSettingsDirty(true);
                                   setDraftThemeId(themeOptionId);
-                                  setThemeId(themeOptionId);
                                 }
                               }}
                               aria-label={`Motyw ${palette.label}`}
@@ -4012,26 +4011,16 @@ const BloodPressureApp: React.FC = () => {
                                   : isActiveThemeLight
                                     ? "rgba(0,0,0,0.18)"
                                     : "rgba(255,255,255,0.16)",
-                                background: isActiveThemeLight
-                                  ? "linear-gradient(135deg, rgba(255,255,255,0.92), rgba(245,245,245,0.86))"
-                                  : "linear-gradient(135deg, rgba(255,255,255,0.08), rgba(255,255,255,0.02))",
+                                background: `linear-gradient(135deg, ${palette.swatchA} 0%, ${palette.swatchA} 48%, ${palette.swatchB} 52%, ${palette.swatchB} 100%)`,
                                 boxShadow: isSelected
                                   ? isActiveThemeLight
-                                    ? "0 0 0 2px rgba(0,0,0,0.11), 0 10px 18px rgba(0,0,0,0.18), inset 0 1px 0 rgba(255,255,255,0.85)"
+                                    ? "0 0 0 2px rgba(0,0,0,0.12), 0 8px 14px rgba(0,0,0,0.16)"
                                     : "0 0 0 2px var(--theme-accent-soft), 0 8px 14px rgba(0,0,0,0.32)"
                                   : isActiveThemeLight
-                                    ? "0 2px 6px rgba(0,0,0,0.10), inset 0 1px 0 rgba(255,255,255,0.78)"
-                                    : "inset 0 1px 0 rgba(255,255,255,0.08)",
+                                    ? "0 2px 6px rgba(0,0,0,0.10)"
+                                    : "0 2px 8px rgba(0,0,0,0.22)",
                               }}
                             >
-                              <span
-                                className="absolute inset-[4px] rounded-[9px]"
-                                style={{
-                                  background: `linear-gradient(135deg, ${palette.swatchA} 0%, ${palette.swatchA} 48%, ${palette.swatchB} 52%, ${palette.swatchB} 100%)`,
-                                  boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.18)",
-                                }}
-                              />
-
                               {isSelected && (
                                 <span
                                   className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded-full"
