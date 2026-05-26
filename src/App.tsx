@@ -2198,7 +2198,6 @@ const ScrollPicker: React.FC<{
           style={{
             WebkitOverflowScrolling: "touch",
             touchAction: "pan-y",
-            maskImage: "linear-gradient(to bottom, transparent 0%, white 25%, white 75%, transparent 100%)",
           }}
         >
           <div style={{ height: spacerHeight }} />
@@ -2211,7 +2210,7 @@ const ScrollPicker: React.FC<{
                 fontSize: "36px",
                 opacity: val === internalValue ? 1 : val >= internalValue - 1 && val <= internalValue + 1 ? nearOpacity : farOpacity,
                 fontWeight: val === internalValue ? 650 : 420,
-                lineHeight: 0.95,
+                lineHeight: 1.06,
                 letterSpacing: "0em",
                 transform:
                   val === internalValue
@@ -2221,7 +2220,8 @@ const ScrollPicker: React.FC<{
                       : "scale(0.7)",
                 color: pickerValueColor,
                 fontVariantNumeric: "tabular-nums lining-nums",
-                textRendering: "optimizeLegibility",
+                WebkitFontSmoothing: "antialiased",
+                textRendering: "auto",
               }}
             >
               {val}
