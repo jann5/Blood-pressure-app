@@ -2818,6 +2818,16 @@ const BloodPressureApp: React.FC = () => {
   const isActiveThemeLight = isLightMonoTheme(activeThemeId);
   const currentTheme = APP_THEME_PALETTES[activeThemeId];
   const themeCssVars = useMemo(() => getThemeCssVars(currentTheme), [currentTheme]);
+  const settingsOverlayTint = isActiveThemeLight
+    ? withAlpha(currentTheme.background, 0.56, "rgba(236,236,233,0.56)")
+    : withAlpha(currentTheme.background, 0.62, "rgba(7,10,14,0.62)");
+  const settingsOverlayRepaintTransform = {
+    midnight: "translate3d(0px, 0, 0)",
+    sand: "translate3d(0.001px, 0, 0)",
+    ocean: "translate3d(0.002px, 0, 0)",
+    blush: "translate3d(0.003px, 0, 0)",
+    sage: "translate3d(0.004px, 0, 0)",
+  }[activeThemeId];
 
   // Convex mutations
   const addReadingMutation = useMutation(api.readings.add);
@@ -3789,7 +3799,15 @@ const BloodPressureApp: React.FC = () => {
 
         {showSettings && (
           <div
-            className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm p-4 flex items-end sm:items-center justify-center"
+            key={`settings-overlay-${activeThemeId}`}
+            className="fixed inset-0 z-50 p-4 flex items-end sm:items-center justify-center"
+            style={{
+              backgroundColor: settingsOverlayTint,
+              backdropFilter: "blur(10px) saturate(145%)",
+              WebkitBackdropFilter: "blur(10px) saturate(145%)",
+              transform: settingsOverlayRepaintTransform,
+              willChange: "transform, background-color, backdrop-filter",
+            }}
             onClick={() => {
               void handleCloseSettings();
             }}
