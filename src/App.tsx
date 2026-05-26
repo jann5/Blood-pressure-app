@@ -2765,6 +2765,7 @@ const BloodPressureApp: React.FC = () => {
   const [currentTab, setCurrentTab] = useState<AppTab>("dashboard");
   const [showSuccess, setShowSuccess] = useState(false);
   const [dataSyncError, setDataSyncError] = useState<string | null>(null);
+  const hydratedSettingsUserIdRef = useRef<string | null>(null);
 
   // Auth state from Convex
   const userData = useQuery(api.authHelpers.getUser);
@@ -2813,7 +2814,7 @@ const BloodPressureApp: React.FC = () => {
     return window.matchMedia("(pointer: coarse)").matches;
   });
   const [isMobileChartTooltipVisible, setIsMobileChartTooltipVisible] = useState(false);
-  const activeThemeId = showSettings ? draftThemeId : themeId;
+  const activeThemeId = themeId;
   const isActiveThemeLight = isLightMonoTheme(activeThemeId);
   const currentTheme = APP_THEME_PALETTES[activeThemeId];
   const themeCssVars = useMemo(() => getThemeCssVars(currentTheme), [currentTheme]);
@@ -2853,17 +2854,16 @@ const BloodPressureApp: React.FC = () => {
   };
 
   useEffect(() => {
-    if (showSettings) {
-      setDraftPreferences(preferences);
-      setDraftDominantHand(dominantHand);
-      setDraftThemeId(themeId);
-      setIsSettingsDirty(false);
-      setSettingsSections({
-        pulse: false,
-        pressure: false,
-      });
-    }
-  }, [showSettings, preferences, dominantHand, themeId]);
+    if (!showSettings) return;
+    setDraftPreferences(preferences);
+    setDraftDominantHand(dominantHand);
+    setDraftThemeId(themeId);
+    setIsSettingsDirty(false);
+    setSettingsSections({
+      pulse: false,
+      pressure: false,
+    });
+  }, [showSettings]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -3469,13 +3469,20 @@ const BloodPressureApp: React.FC = () => {
     previousTabRef.current = currentTab;
   }, [currentTab, addMeasurementPrefill, readings.length, systolic, diastolic, pulse]);
 
-  // Load preferences from user data
+  // Hydrate settings from backend once per signed-in user to avoid overwriting live local theme changes.
   useEffect(() => {
-    const nextDominant = normalizeArmSide(userData?.dominantHand, "right");
+    if (!userData?._id) {
+      hydratedSettingsUserIdRef.current = null;
+      return;
+    }
+    if (showSettings) return;
+    if (hydratedSettingsUserIdRef.current === userData._id) return;
+
+    const nextDominant = normalizeArmSide(userData.dominantHand, "right");
     setDominantHand(nextDominant);
     setDraftDominantHand(nextDominant);
 
-    if (userData?.preferences) {
+    if (userData.preferences) {
       const prefs = normalizeMeasurementPreferences({
         pressure: userData.preferences.pressure as PressurePreferences,
         pulse: userData.preferences.pulse as PulsePreferences,
@@ -3489,7 +3496,9 @@ const BloodPressureApp: React.FC = () => {
         setDraftThemeId(nextThemeRaw);
       }
     }
-  }, [userData?.preferences, userData?.dominantHand]);
+
+    hydratedSettingsUserIdRef.current = userData._id;
+  }, [showSettings, userData?._id, userData?.dominantHand, userData?.preferences]);
 
   const filteredReadings = useMemo(() => {
     const rangeStart = getRangeStart(timeRange, new Date());
@@ -3977,7 +3986,7 @@ const BloodPressureApp: React.FC = () => {
                         boxShadow: isActiveThemeLight ? "inset 0 1px 0 rgba(255,255,255,0.62)" : undefined,
                       }}
                     >
-                      <div className="grid grid-cols-5 gap-2">
+                      <div className="flex items-center justify-between gap-2">
                         {THEME_IDS.map((themeOptionId) => {
                           const palette = APP_THEME_PALETTES[themeOptionId];
                           const isSelected = draftThemeId === themeOptionId;
@@ -3990,10 +3999,11 @@ const BloodPressureApp: React.FC = () => {
                                 if (draftThemeId !== themeOptionId) {
                                   setIsSettingsDirty(true);
                                   setDraftThemeId(themeOptionId);
+                                  setThemeId(themeOptionId);
                                 }
                               }}
                               aria-label={`Motyw ${palette.label}`}
-                              className="relative h-12 rounded-xl border transition-all duration-200 ease-out hover:-translate-y-[1px] active:scale-[0.98]"
+                              className="relative h-11 w-11 sm:h-12 sm:w-12 shrink-0 rounded-xl border transition-all duration-200 ease-out hover:-translate-y-[1px] active:scale-[0.98]"
                               style={{
                                 borderColor: isSelected
                                   ? isActiveThemeLight
