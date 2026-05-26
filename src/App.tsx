@@ -3979,14 +3979,14 @@ const BloodPressureApp: React.FC = () => {
                     </div>
 
                     <div
-                      className="rounded-2xl p-1.5"
+                      className="rounded-2xl p-1.5 overflow-hidden"
                       style={{
                         border: isActiveThemeLight ? "1px solid rgba(0,0,0,0.10)" : "1px solid rgba(255,255,255,0.08)",
                         background: isActiveThemeLight ? "rgba(0,0,0,0.035)" : "rgba(255,255,255,0.03)",
                         boxShadow: isActiveThemeLight ? "inset 0 1px 0 rgba(255,255,255,0.62)" : undefined,
                       }}
                     >
-                      <div className="flex items-center justify-between gap-2">
+                      <div className="grid grid-cols-5 gap-2">
                         {THEME_IDS.map((themeOptionId) => {
                           const palette = APP_THEME_PALETTES[themeOptionId];
                           const isSelected = draftThemeId === themeOptionId;
@@ -4003,7 +4003,7 @@ const BloodPressureApp: React.FC = () => {
                                 }
                               }}
                               aria-label={`Motyw ${palette.label}`}
-                              className="relative h-11 w-11 sm:h-12 sm:w-12 shrink-0 rounded-xl border transition-all duration-200 ease-out hover:-translate-y-[1px] active:scale-[0.98]"
+                              className="relative w-full min-w-0 aspect-square rounded-xl border transition-all duration-200 ease-out hover:-translate-y-[1px] active:scale-[0.98]"
                               style={{
                                 borderColor: isSelected
                                   ? isActiveThemeLight
@@ -4034,17 +4034,15 @@ const BloodPressureApp: React.FC = () => {
 
                               {isSelected && (
                                 <span
-                                  className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full"
+                                  className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded-full"
                                   style={{
-                                    background: isActiveThemeLight ? "#1f1f1f" : "var(--theme-accent)",
-                                    border: isActiveThemeLight
-                                      ? "1px solid rgba(255,255,255,0.68)"
-                                      : "1px solid rgba(0,0,0,0.22)",
+                                    background: palette.accent,
+                                    border: `1px solid ${withAlpha(palette.onAccent, 0.32, "rgba(0,0,0,0.22)")}`,
                                   }}
                                 >
                                   <Check
                                     className="w-2.5 h-2.5"
-                                    style={{ color: isActiveThemeLight ? "#F5F5F5" : "#FFFFFF", strokeWidth: 3 }}
+                                    style={{ color: palette.onAccent, strokeWidth: 3 }}
                                   />
                                 </span>
                               )}
