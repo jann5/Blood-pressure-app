@@ -9,12 +9,18 @@ export default defineConfig({
     react(),
     tailwindcss(),
     VitePWA({
-      injectRegister: "auto",
+      injectRegister: false,
       registerType: "autoUpdate",
+      strategies: "injectManifest",
+      srcDir: "src",
+      filename: "sw.ts",
       manifest: false,
-      workbox: {
+      injectManifest: {
         globPatterns: ["**/*.{js,css,html,ico,png,svg,webp,woff2}"],
-        navigateFallback: "index.html",
+      },
+      devOptions: {
+        enabled: true,
+        type: "module",
       },
     }),
   ],

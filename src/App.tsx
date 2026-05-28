@@ -13,6 +13,8 @@ import {
   Heart,
   Home,
   KeyRound,
+  LayoutGrid,
+  List,
   LogOut,
   Plus,
   Settings,
@@ -49,7 +51,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { useAuthActions, useConvexAuth } from "@convex-dev/auth/react";
 import { api } from "../convex/_generated/api";
-import { useAction, useMutation, useQuery } from "convex/react";
+import { useAction, useConvex, useMutation, useQuery } from "convex/react";
 
 type AppTab = "dashboard" | "add" | "history" | "analytics";
 type PressureCategory = "normal" | "elevated" | "high1" | "high2" | "low";
@@ -61,6 +63,7 @@ type PasswordResetStep = "idle" | "request" | "verify";
 type Handedness = "left" | "right";
 type ArmSide = "left" | "right";
 type AppThemeId = "midnight" | "sand" | "blush" | "sage" | "ocean";
+type HistoryViewMode = "cards" | "compact";
 
 import type { Id } from "../convex/_generated/dataModel";
 
@@ -135,6 +138,23 @@ interface MeasurementPreferences {
   pulse: PulsePreferences;
 }
 
+interface PushSubscriptionPayload {
+  endpoint: string;
+  expirationTime: number | null;
+  keys: {
+    p256dh: string;
+    auth: string;
+  };
+}
+
+interface NotificationPreferenceView {
+  enabled: boolean;
+  reminderHour: number;
+  reminderMinute: number;
+  timezone: string;
+  hasSubscription: boolean;
+}
+
 const defaultMeasurementPreferences: MeasurementPreferences = {
   pressure: {
     lowSys: 90,
@@ -152,7 +172,6 @@ const defaultMeasurementPreferences: MeasurementPreferences = {
     high: 100,
   },
 };
-
 const PRESSURE_RULES = {
   lowSys: 90,
   lowDia: 60,
@@ -179,6 +198,112 @@ const ADD_DEFAULTS = {
   diastolic: 80,
   pulse: 72,
 } as const;
+const DEFAULT_REMINDER_HOUR = 20;
+const DEFAULT_REMINDER_MINUTE = 0;
+const WEB_PUSH_PUBLIC_KEY = import.meta.env.VITE_WEB_PUSH_PUBLIC_KEY?.trim() ?? "";
+const defaultNotificationPreferences: NotificationPreferenceView = {
+  enabled: false,
+  reminderHour: DEFAULT_REMINDER_HOUR,
+  reminderMinute: DEFAULT_REMINDER_MINUTE,
+  timezone: "UTC",
+  hasSubscription: false,
+};
+
+const isPushSupportedInBrowser = (): boolean =>
+  typeof window !== "undefined" &&
+  "Notification" in window &&
+  "serviceWorker" in navigator &&
+  "PushManager" in window;
+
+const getBrowserTimezone = (): string => {
+  if (typeof Intl === "undefined") return "UTC";
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+};
+
+const formatReminderInputValue = (hour: number, minute: number): string =>
+  `${String(Math.min(23, Math.max(0, Math.trunc(hour)))).padStart(2, "0")}:${String(
+    Math.min(59, Math.max(0, Math.trunc(minute))),
+  ).padStart(2, "0")}`;
+
+const parseReminderInputValue = (
+  value: string,
+): {
+  hour: number;
+  minute: number;
+} | null => {
+  const [hourRaw, minuteRaw] = value.split(":");
+  const hour = Number(hourRaw);
+  const minute = Number(minuteRaw);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+  return {
+    hour: Math.min(23, Math.max(0, Math.trunc(hour))),
+    minute: Math.min(59, Math.max(0, Math.trunc(minute))),
+  };
+};
+
+const urlBase64ToUint8Array = (base64String: string): Uint8Array => {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+};
+
+const normalizePushSubscription = (subscription: PushSubscription): PushSubscriptionPayload => {
+  const json = subscription.toJSON() as {
+    endpoint?: string;
+    expirationTime?: number | null;
+    keys?: {
+      p256dh?: string;
+      auth?: string;
+    };
+  };
+
+  if (!json.endpoint || !json.keys?.p256dh || !json.keys?.auth) {
+    throw new Error("Nie udało się odczytać danych subskrypcji push.");
+  }
+
+  return {
+    endpoint: json.endpoint,
+    expirationTime: json.expirationTime ?? null,
+    keys: {
+      p256dh: json.keys.p256dh,
+      auth: json.keys.auth,
+    },
+  };
+};
+
+const ensurePushSubscription = async (): Promise<PushSubscriptionPayload> => {
+  if (!isPushSupportedInBrowser()) {
+    throw new Error("To urządzenie nie obsługuje powiadomień push.");
+  }
+  if (!WEB_PUSH_PUBLIC_KEY) {
+    throw new Error("Brak klucza VAPID (VITE_WEB_PUSH_PUBLIC_KEY).");
+  }
+
+  const registration = await navigator.serviceWorker.ready;
+  let subscription = await registration.pushManager.getSubscription();
+  if (!subscription) {
+    subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(WEB_PUSH_PUBLIC_KEY) as unknown as BufferSource,
+    });
+  }
+
+  return normalizePushSubscription(subscription);
+};
+
+const unsubscribePush = async (): Promise<void> => {
+  if (!isPushSupportedInBrowser()) return;
+  const registration = await navigator.serviceWorker.ready;
+  const existing = await registration.pushManager.getSubscription();
+  if (existing) {
+    await existing.unsubscribe();
+  }
+};
 
 interface AppThemePalette {
   id: AppThemeId;
@@ -2759,6 +2884,7 @@ const DateTimePicker: React.FC<{
 const BloodPressureApp: React.FC = () => {
   const appScrollRef = useRef<HTMLDivElement>(null);
   useMobileOverscrollLock(appScrollRef);
+  const convex = useConvex();
   const { signOut } = useAuthActions();
   const { isAuthenticated, isLoading: isAuthLoading } = useConvexAuth();
   const [authView, setAuthView] = useState<AuthView>("login");
@@ -2769,6 +2895,8 @@ const BloodPressureApp: React.FC = () => {
 
   // Auth state from Convex
   const userData = useQuery(api.authHelpers.getUser);
+  const [notificationPreference, setNotificationPreference] =
+    useState<NotificationPreferenceView>(defaultNotificationPreferences);
 
   const [systolic, setSystolic] = useState<number>(ADD_DEFAULTS.systolic);
   const [diastolic, setDiastolic] = useState<number>(ADD_DEFAULTS.diastolic);
@@ -2781,6 +2909,7 @@ const BloodPressureApp: React.FC = () => {
   const [note, setNote] = useState("");
 
   const [timeRange, setTimeRange] = useState<TimeRange>("7d");
+  const [historyViewMode, setHistoryViewMode] = useState<HistoryViewMode>("cards");
   const [showSettings, setShowSettings] = useState(false);
   const [themeId, setThemeId] = useState<AppThemeId>(() => readStoredThemeId());
   const [draftThemeId, setDraftThemeId] = useState<AppThemeId>(() => readStoredThemeId());
@@ -2814,6 +2943,17 @@ const BloodPressureApp: React.FC = () => {
     return window.matchMedia("(pointer: coarse)").matches;
   });
   const [isMobileChartTooltipVisible, setIsMobileChartTooltipVisible] = useState(false);
+  const [notificationPermission, setNotificationPermission] = useState<
+    NotificationPermission | "unsupported"
+  >(() => {
+    if (!isPushSupportedInBrowser()) return "unsupported";
+    return Notification.permission;
+  });
+  const [isNotificationSaving, setIsNotificationSaving] = useState(false);
+  const [notificationDraft, setNotificationDraft] = useState<NotificationPreferenceView>({
+    ...defaultNotificationPreferences,
+    timezone: getBrowserTimezone(),
+  });
   const activeThemeId = showSettings ? draftThemeId : themeId;
   const isActiveThemeLight = isLightMonoTheme(activeThemeId);
   const currentTheme = APP_THEME_PALETTES[activeThemeId];
@@ -2833,6 +2973,8 @@ const BloodPressureApp: React.FC = () => {
   const addReadingMutation = useMutation(api.readings.add);
   const deleteReadingMutation = useMutation(api.readings.remove);
   const savePreferencesMutation = useMutation(api.preferences.save);
+  const saveNotificationSettingsMutation = useMutation(api.notifications.saveSettings);
+  const saveNotificationSubscriptionMutation = useMutation(api.notifications.saveSubscription);
   const setDominantHandMutation = useMutation(api.account.setDominantHand);
   const deleteAccountMutation = useMutation(api.account.deleteAccount);
   const changePasswordAction = useAction(api.account.changePassword);
@@ -2894,6 +3036,57 @@ const BloodPressureApp: React.FC = () => {
     media.addListener(update);
     return () => media.removeListener(update);
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadNotificationPreference = async () => {
+      try {
+        const result = await convex.query(api.notifications.get, {});
+        if (cancelled || !result) return;
+        setNotificationPreference(result);
+      } catch (error) {
+        if (cancelled) return;
+        const message = extractErrorMessage(error, "").toLowerCase();
+        if (message.includes("could not find public function for 'notifications:get'")) {
+          setNotificationPreference({
+            ...defaultNotificationPreferences,
+            timezone: getBrowserTimezone(),
+          });
+          return;
+        }
+        console.error("Notifications query failed", error);
+        setNotificationPreference({
+          ...defaultNotificationPreferences,
+          timezone: getBrowserTimezone(),
+        });
+      }
+    };
+
+    void loadNotificationPreference();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [convex, isAuthenticated, userData?._id]);
+
+  useEffect(() => {
+    if (!isPushSupportedInBrowser()) {
+      setNotificationPermission("unsupported");
+      return;
+    }
+    setNotificationPermission(Notification.permission);
+  }, [showSettings]);
+
+  useEffect(() => {
+    setNotificationDraft({
+      enabled: notificationPreference.enabled,
+      reminderHour: notificationPreference.reminderHour,
+      reminderMinute: notificationPreference.reminderMinute,
+      timezone: notificationPreference.timezone || getBrowserTimezone(),
+      hasSubscription: notificationPreference.hasSubscription,
+    });
+  }, [notificationPreference]);
 
   const numberFromInput = (valueAsNumber: number, fallback: number) =>
     Number.isFinite(valueAsNumber) ? valueAsNumber : fallback;
@@ -3020,6 +3213,96 @@ const BloodPressureApp: React.FC = () => {
   const handleResetPreferences = () => {
     setIsSettingsDirty(true);
     setDraftPreferences(defaultMeasurementPreferences);
+  };
+
+  const persistNotificationSettings = async (nextDraft: NotificationPreferenceView) => {
+    await saveNotificationSettingsMutation({
+      enabled: nextDraft.enabled,
+      reminderHour: nextDraft.reminderHour,
+      reminderMinute: nextDraft.reminderMinute,
+      timezone: nextDraft.timezone,
+    });
+  };
+
+  const handleNotificationTimeChange = async (nextValue: string) => {
+    const parsed = parseReminderInputValue(nextValue);
+    if (!parsed) return;
+
+    const nextDraft: NotificationPreferenceView = {
+      ...notificationDraft,
+      reminderHour: parsed.hour,
+      reminderMinute: parsed.minute,
+      timezone: getBrowserTimezone(),
+    };
+    setNotificationDraft(nextDraft);
+
+    setIsNotificationSaving(true);
+    try {
+      await persistNotificationSettings(nextDraft);
+      setNotificationPreference(nextDraft);
+      setDataSyncError(null);
+    } catch (error) {
+      setDataSyncError(extractErrorMessage(error, "Nie udało się zapisać godziny przypomnienia."));
+    } finally {
+      setIsNotificationSaving(false);
+    }
+  };
+
+  const handleToggleNotifications = async () => {
+    if (isNotificationSaving) return;
+
+    setIsNotificationSaving(true);
+
+    try {
+      if (notificationDraft.enabled) {
+        await unsubscribePush();
+        await saveNotificationSubscriptionMutation({ subscription: null });
+
+        const nextDraft: NotificationPreferenceView = {
+          ...notificationDraft,
+          enabled: false,
+          hasSubscription: false,
+          timezone: getBrowserTimezone(),
+        };
+        setNotificationDraft(nextDraft);
+        await persistNotificationSettings(nextDraft);
+        setNotificationPreference(nextDraft);
+        setDataSyncError(null);
+        return;
+      }
+
+      if (!isPushSupportedInBrowser()) {
+        throw new Error("To urządzenie nie obsługuje powiadomień push.");
+      }
+
+      let permission = Notification.permission;
+      if (permission === "default") {
+        permission = await Notification.requestPermission();
+      }
+      setNotificationPermission(permission);
+
+      if (permission !== "granted") {
+        throw new Error("Aby włączyć przypomnienia, zezwól na powiadomienia w przeglądarce.");
+      }
+
+      const subscription = await ensurePushSubscription();
+      await saveNotificationSubscriptionMutation({ subscription });
+
+      const nextDraft: NotificationPreferenceView = {
+        ...notificationDraft,
+        enabled: true,
+        hasSubscription: true,
+        timezone: getBrowserTimezone(),
+      };
+      setNotificationDraft(nextDraft);
+      await persistNotificationSettings(nextDraft);
+      setNotificationPreference(nextDraft);
+      setDataSyncError(null);
+    } catch (error) {
+      setDataSyncError(extractErrorMessage(error, "Nie udało się włączyć przypomnień."));
+    } finally {
+      setIsNotificationSaving(false);
+    }
   };
 
   const parseDateInputToBoundary = (value: string, endOfDay: boolean): Date | null => {
@@ -3993,6 +4276,82 @@ const BloodPressureApp: React.FC = () => {
                     style={{
                       borderColor: isActiveThemeLight ? "rgba(0,0,0,0.12)" : "rgba(255,255,255,0.10)",
                       background: isActiveThemeLight ? "rgba(255,255,255,0.42)" : "rgba(255,255,255,0.02)",
+                      boxShadow: isActiveThemeLight
+                        ? "0 10px 18px rgba(0,0,0,0.08), inset 0 1px 0 rgba(255,255,255,0.72)"
+                        : undefined,
+                    }}
+                  >
+                    <div>
+                      <p className="text-white text-lg font-semibold leading-tight">Powiadomienia</p>
+                      <p className="text-white/45 text-xs mt-1">
+                        Codzienne przypomnienie o pomiarze pulsu
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void handleToggleNotifications();
+                      }}
+                      className="w-full h-11 rounded-xl border text-sm font-medium transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+                      style={{
+                        borderColor: notificationDraft.enabled
+                          ? "var(--theme-accent-border)"
+                          : isActiveThemeLight
+                            ? "rgba(0,0,0,0.16)"
+                            : "rgba(255,255,255,0.12)",
+                        background: notificationDraft.enabled
+                          ? "var(--theme-accent-soft)"
+                          : isActiveThemeLight
+                            ? "rgba(0,0,0,0.04)"
+                            : "rgba(255,255,255,0.04)",
+                        color: notificationDraft.enabled
+                          ? "var(--theme-accent-muted)"
+                          : isActiveThemeLight
+                            ? "rgba(22,22,22,0.78)"
+                            : "rgba(255,255,255,0.78)",
+                      }}
+                      disabled={isNotificationSaving}
+                    >
+                      {isNotificationSaving
+                        ? "Zapisywanie..."
+                        : notificationDraft.enabled
+                          ? "Wyłącz codzienne przypomnienia"
+                          : "Włącz codzienne przypomnienia"}
+                    </button>
+
+                    <div>
+                      <Label className="text-white/55 text-sm mb-2 block">Godzina przypomnienia</Label>
+                      <Input
+                        type="time"
+                        value={formatReminderInputValue(
+                          notificationDraft.reminderHour,
+                          notificationDraft.reminderMinute,
+                        )}
+                        onChange={(event) => {
+                          void handleNotificationTimeChange(event.currentTarget.value);
+                        }}
+                        className="bg-white/5 border-white/10 text-white text-base h-12"
+                        disabled={isNotificationSaving}
+                      />
+                    </div>
+
+                    <p className="text-white/45 text-xs">
+                      {notificationPermission === "unsupported"
+                        ? "To urządzenie nie obsługuje powiadomień push."
+                        : notificationPermission === "granted"
+                          ? "Dostęp do powiadomień: przyznany."
+                          : notificationPermission === "denied"
+                            ? "Powiadomienia są zablokowane. Włącz je w ustawieniach przeglądarki."
+                            : "Po włączeniu aplikacja poprosi o zgodę na powiadomienia."}
+                    </p>
+                  </section>
+
+                  <section
+                    className="rounded-2xl border p-4 space-y-3.5"
+                    style={{
+                      borderColor: isActiveThemeLight ? "rgba(0,0,0,0.12)" : "rgba(255,255,255,0.10)",
+                      background: isActiveThemeLight ? "rgba(255,255,255,0.42)" : "rgba(255,255,255,0.02)",
                       boxShadow: isActiveThemeLight ? "0 10px 18px rgba(0,0,0,0.08), inset 0 1px 0 rgba(255,255,255,0.72)" : undefined,
                     }}
                   >
@@ -4366,7 +4725,11 @@ const BloodPressureApp: React.FC = () => {
               </>
             ) : (
               <>
-                <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 flex items-center justify-between">
+                <button
+                  type="button"
+                  onClick={() => setCurrentTab("history")}
+                  className="w-full rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 flex items-center justify-between text-left hover:bg-white/[0.05] transition-colors"
+                >
                   <div className="flex items-center gap-2.5">
                     <span className="inline-flex items-center justify-center" role="img" aria-label={streakGraphic.alt}>
                       <streakGraphic.icon
@@ -4387,7 +4750,7 @@ const BloodPressureApp: React.FC = () => {
                     <p className="text-white text-2xl font-semibold tabular-nums leading-none">{formatValueOrDash(streak.current)}</p>
                     <p className="text-white/45 text-xs">{streak.hasTodayEntry ? "dzisiaj ok" : "brak dziś"}</p>
                   </div>
-                </div>
+                </button>
 
                 {readings.length === 0 ? (
                   <GlassCard>
@@ -4547,7 +4910,57 @@ const BloodPressureApp: React.FC = () => {
 
         {currentTab === "history" && (
           <div className="p-6 space-y-5">
-            <h1 className="text-white text-3xl font-bold mb-6 pt-4">Historia</h1>
+            <div className="pt-4 flex items-center justify-between gap-3">
+              <h1 className="text-white text-3xl font-bold">Historia</h1>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setHistoryViewMode("cards")}
+                  aria-label="Widok duży"
+                  title="Widok duży"
+                  className="h-9 w-9 rounded-lg inline-flex items-center justify-center transition-colors"
+                  style={{
+                    background:
+                      historyViewMode === "cards"
+                        ? "var(--theme-accent-soft)"
+                        : isActiveThemeLight
+                          ? "rgba(0,0,0,0.04)"
+                          : "rgba(255,255,255,0.04)",
+                    color:
+                      historyViewMode === "cards"
+                        ? "var(--theme-accent-muted)"
+                        : isActiveThemeLight
+                          ? "rgba(22,22,22,0.74)"
+                          : "rgba(255,255,255,0.74)",
+                  }}
+                >
+                  <LayoutGrid className="h-4 w-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setHistoryViewMode("compact")}
+                  aria-label="Widok kompaktowy"
+                  title="Widok kompaktowy"
+                  className="h-9 w-9 rounded-lg inline-flex items-center justify-center transition-colors"
+                  style={{
+                    background:
+                      historyViewMode === "compact"
+                        ? "var(--theme-accent-soft)"
+                        : isActiveThemeLight
+                          ? "rgba(0,0,0,0.04)"
+                          : "rgba(255,255,255,0.04)",
+                    color:
+                      historyViewMode === "compact"
+                        ? "var(--theme-accent-muted)"
+                        : isActiveThemeLight
+                          ? "rgba(22,22,22,0.74)"
+                          : "rgba(255,255,255,0.74)",
+                  }}
+                >
+                  <List className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
             {isUserDataLoading ? (
               <>
                 <SkeletonBar className="h-28 w-full" />
@@ -4597,6 +5010,7 @@ const BloodPressureApp: React.FC = () => {
                     : getPulseCategoryColor(displayPulseCategory);
                 const isExpanded = expandedHistoryReadingIds.has(reading.id);
                 const pressureCategory = getPressureCategory(displaySystolic, displayDiastolic);
+                const pressureStyles = getCategoryStyles(pressureCategory);
                 const primaryArmLabel = getArmLabel(reading.arm);
                 const secondaryArmLabel = secondArm ? getArmLabel(secondArm.arm) : "";
 
@@ -4617,76 +5031,119 @@ const BloodPressureApp: React.FC = () => {
                     }}
                     disabled={isDeletingReading || pendingDeleteReadingId !== null}
                   >
-                    <GlassCard className="relative p-5">
+                    <GlassCard className={historyViewMode === "compact" ? "relative p-3.5" : "relative p-5"}>
                       <div className="min-w-0">
-                        <div className="flex items-center justify-between gap-2 mb-3">
-                          <p className="text-white/42 text-xs sm:text-sm tracking-[0.01em] whitespace-nowrap">
-                            {formatTime(reading.timestamp)} • {formatDate(reading.timestamp)}
-                          </p>
-                          {hasSecondArm && (
-                            <span className="rounded-full border border-white/12 bg-white/[0.03] px-2 py-0.5 text-[10px] text-white/55 tracking-wide">
-                              2 ręce
-                            </span>
-                          )}
-                        </div>
-                        <div className="flex items-end gap-2 mb-2.5 flex-wrap">
-                          <span className="text-white text-[44px] font-bold tabular-nums leading-[0.92] tracking-[-0.02em]">
-                            {formatValueOrDash(displaySystolic)}/{formatValueOrDash(displayDiastolic)}
-                          </span>
-                          <span
-                            className="text-[36px] whitespace-nowrap tabular-nums leading-[0.94]"
-                            style={{ color: pulseValueColor }}
-                          >
-                            · {formatValueOrDash(displayPulse)} bpm
-                          </span>
-                        </div>
-                        <div className="mb-2.5 flex items-center justify-between gap-3 flex-wrap">
-                          <p className="text-[11px] tracking-wide" style={{ color: pulseLabelColor }}>
-                            {getPulseCategoryLabel(displayPulseCategory)}
-                          </p>
-                          <CategoryBadge category={pressureCategory} />
-                        </div>
-
-                        {secondArm ? (
-                          <>
-                            <div className="mb-0.5 flex items-center justify-between gap-2">
-                              <p className="text-white/34 text-xs leading-5">
-                                {primaryArmLabel} + {secondaryArmLabel}
+                        {historyViewMode === "compact" ? (
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="text-white/52 text-[11px] tracking-[0.01em] whitespace-nowrap">
+                                {formatTime(reading.timestamp)} • {formatDate(reading.timestamp)}
                               </p>
-                              <button
-                                type="button"
-                                onClick={() => toggleHistoryReadingDetails(reading.id)}
-                                onPointerDown={(event) => event.stopPropagation()}
-                                data-no-swipe="true"
-                                className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] hover:bg-white/[0.05] transition-colors"
-                                style={{ color: "var(--theme-info)" }}
-                                aria-expanded={isExpanded}
+                              <div className="flex items-end gap-2 mt-0.5">
+                                <span className="text-white text-2xl font-bold tabular-nums leading-none">
+                                  {formatValueOrDash(displaySystolic)}/{formatValueOrDash(displayDiastolic)}
+                                </span>
+                                <span className="text-sm tabular-nums leading-none" style={{ color: pulseValueColor }}>
+                                  {formatValueOrDash(displayPulse)} bpm
+                                </span>
+                              </div>
+                              <p className="text-white/45 text-[11px] mt-1 leading-tight">
+                                {secondArm ? `${primaryArmLabel} + ${secondaryArmLabel}` : primaryArmLabel}
+                              </p>
+                              {reading.note && (
+                                <p className="text-white/35 text-[11px] mt-1 truncate">{reading.note}</p>
+                              )}
+                            </div>
+                            <div className="shrink-0 flex flex-col items-end gap-1.5">
+                              <span
+                                className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium whitespace-nowrap leading-none"
+                                style={{
+                                  backgroundColor: pressureStyles.bg,
+                                  color: pressureStyles.text,
+                                  border: `1px solid ${pressureStyles.border}`,
+                                }}
                               >
-                                {isExpanded ? "Ukryj" : "Szczegóły"}
-                                <ChevronDown
-                                  className={`h-3.5 w-3.5 transition-transform duration-200 ${isExpanded ? "rotate-180" : ""}`}
-                                />
-                              </button>
+                                {getCategoryLabel(pressureCategory)}
+                              </span>
+                              {hasSecondArm && (
+                                <span className="rounded-full border border-white/12 bg-white/[0.03] px-2 py-0.5 text-[10px] text-white/55 tracking-wide">
+                                  2 ręce
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        ) : (
+                          <>
+                            <div className="flex items-center justify-between gap-2 mb-3">
+                              <p className="text-white/42 text-xs sm:text-sm tracking-[0.01em] whitespace-nowrap">
+                                {formatTime(reading.timestamp)} • {formatDate(reading.timestamp)}
+                              </p>
+                              {hasSecondArm && (
+                                <span className="rounded-full border border-white/12 bg-white/[0.03] px-2 py-0.5 text-[10px] text-white/55 tracking-wide">
+                                  2 ręce
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-end gap-2 mb-2.5 flex-wrap">
+                              <span className="text-white text-[44px] font-bold tabular-nums leading-[0.92] tracking-[-0.02em]">
+                                {formatValueOrDash(displaySystolic)}/{formatValueOrDash(displayDiastolic)}
+                              </span>
+                              <span
+                                className="text-[36px] whitespace-nowrap tabular-nums leading-[0.94]"
+                                style={{ color: pulseValueColor }}
+                              >
+                                · {formatValueOrDash(displayPulse)} bpm
+                              </span>
+                            </div>
+                            <div className="mb-2.5 flex items-center justify-between gap-3 flex-wrap">
+                              <p className="text-[11px] tracking-wide" style={{ color: pulseLabelColor }}>
+                                {getPulseCategoryLabel(displayPulseCategory)}
+                              </p>
+                              <CategoryBadge category={pressureCategory} />
                             </div>
 
-                            {isExpanded && (
-                              <div className="space-y-1 mb-1.5">
-                                <p className="text-white/45 text-xs tracking-[0.01em]">
-                                  {getArmLabel(reading.arm)}: {formatValueOrDash(reading.systolic)}/
-                                  {formatValueOrDash(reading.diastolic)} • {formatValueOrDash(reading.pulse)} bpm
-                                </p>
-                                <p className="text-white/45 text-xs tracking-[0.01em]">
-                                  {getArmLabel(secondArm.arm)}: {formatValueOrDash(secondArm.systolic)}/
-                                  {formatValueOrDash(secondArm.diastolic)} • {formatValueOrDash(secondArm.pulse)} bpm
-                                </p>
-                              </div>
-                            )}
-                          </>
-                        ) : (
-                          <p className="text-white/34 text-xs mb-1">{getArmLabel(reading.arm)}</p>
-                        )}
+                            {secondArm ? (
+                              <>
+                                <div className="mb-0.5 flex items-center justify-between gap-2">
+                                  <p className="text-white/34 text-xs leading-5">
+                                    {primaryArmLabel} + {secondaryArmLabel}
+                                  </p>
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleHistoryReadingDetails(reading.id)}
+                                    onPointerDown={(event) => event.stopPropagation()}
+                                    data-no-swipe="true"
+                                    className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] hover:bg-white/[0.05] transition-colors"
+                                    style={{ color: "var(--theme-info)" }}
+                                    aria-expanded={isExpanded}
+                                  >
+                                    {isExpanded ? "Ukryj" : "Szczegóły"}
+                                    <ChevronDown
+                                      className={`h-3.5 w-3.5 transition-transform duration-200 ${isExpanded ? "rotate-180" : ""}`}
+                                    />
+                                  </button>
+                                </div>
 
-                        {reading.note && <p className="text-white/32 text-xs mt-2">{reading.note}</p>}
+                                {isExpanded && (
+                                  <div className="space-y-1 mb-1.5">
+                                    <p className="text-white/45 text-xs tracking-[0.01em]">
+                                      {getArmLabel(reading.arm)}: {formatValueOrDash(reading.systolic)}/
+                                      {formatValueOrDash(reading.diastolic)} • {formatValueOrDash(reading.pulse)} bpm
+                                    </p>
+                                    <p className="text-white/45 text-xs tracking-[0.01em]">
+                                      {getArmLabel(secondArm.arm)}: {formatValueOrDash(secondArm.systolic)}/
+                                      {formatValueOrDash(secondArm.diastolic)} • {formatValueOrDash(secondArm.pulse)} bpm
+                                    </p>
+                                  </div>
+                                )}
+                              </>
+                            ) : (
+                              <p className="text-white/34 text-xs mb-1">{getArmLabel(reading.arm)}</p>
+                            )}
+
+                            {reading.note && <p className="text-white/32 text-xs mt-2">{reading.note}</p>}
+                          </>
+                        )}
                       </div>
                     </GlassCard>
                   </SwipeDeleteCard>

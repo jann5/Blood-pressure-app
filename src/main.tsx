@@ -4,6 +4,9 @@ import App from "./App";
 import "./index.css";
 import { ConvexReactClient } from "convex/react";
 import { ConvexAuthProvider } from "@convex-dev/auth/react";
+import { registerSW } from "virtual:pwa-register";
+
+registerSW({ immediate: true });
 
 const convex = new ConvexReactClient(import.meta.env.VITE_CONVEX_URL!);
 

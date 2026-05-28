@@ -10,6 +10,14 @@ const appThemeValidator = v.union(
   v.literal("sage"),
   v.literal("ocean"),
 );
+const pushSubscriptionValidator = v.object({
+  endpoint: v.string(),
+  expirationTime: v.union(v.number(), v.null()),
+  keys: v.object({
+    p256dh: v.string(),
+    auth: v.string(),
+  }),
+});
 const authTablesWithoutUsers = (({ users: _users, ...rest }) => rest)(authTables);
 
 export default defineSchema({
@@ -66,4 +74,16 @@ export default defineSchema({
       high: v.number(),
     }),
   }).index("by_userId", ["userId"]),
+
+  notificationPreferences: defineTable({
+    userId: v.string(),
+    enabled: v.boolean(),
+    reminderHour: v.number(),
+    reminderMinute: v.number(),
+    timezone: v.string(),
+    lastSentLocalDate: v.optional(v.string()),
+    subscription: v.union(pushSubscriptionValidator, v.null()),
+  })
+    .index("by_userId", ["userId"])
+    .index("by_enabled", ["enabled"]),
 });
